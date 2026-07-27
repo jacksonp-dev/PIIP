@@ -1,0 +1,47 @@
+.env
+.streamlit/secrets.toml
+*.db
+cost_state.json
+shadow_basket_state.json
+# Explicit, not just the *.log pattern below -- agents.py's PIIP_DEBUG_FILE env var defaults to
+# this name but can be overridden to anything, which would silently escape a *.log-only rule.
+piip_llm_debug.log
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Other people's editors/OS cruft -- harmless to ignore even if unused locally
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+
+# Superseded by BUILD_PLAN.md -- kept locally for the long-term-vision history, not published.
+# Also excludes the earlier AI-assisted planning/prompt docs (ClaudePrompt.txt, AgentPrompts.txt)
+# -- these describe the scrapped original architecture and reveal the AI-assisted build process,
+# neither of which belongs in the public repo.
+IIP_full_build_guide.docx
+ClaudePrompt.txt
+AgentPrompts.txt
+
+# Marker launch_piip.bat creates after the FIRST successful `pip install -r requirements.txt`
+# into python-embed/ -- must never be committed, or a fresh clone would wrongly believe its
+# (uninstalled) dependencies are already there and skip straight to a broken `streamlit run`.
+.deps_installed
+# pip's real install output, redirected here instead of the console so first-run setup doesn't
+# look like a wall of scary package-manager text -- ends in .txt, not .log, so *.log above
+# wouldn't have caught it.
+setup_log.txt
+
+# python-embed/ ITSELF is committed (the portable Python runtime + bootstrapped pip, ~34MB, so a
+# clone works with zero separate installs) -- but if launch_piip.bat is ever run directly inside
+# this real repo folder (rather than a copy) instead of only in test copies, pip installs every
+# requirements.txt package into python-embed/Lib/site-packages/, which must NOT get committed --
+# that's regenerable local state, not source, and would bloat the repo with the same ~300MB+ this
+# whole design exists to avoid shipping.
+python-embed/Lib/site-packages/*
+!python-embed/Lib/site-packages/pip
+!python-embed/Lib/site-packages/pip-*.dist-info
+!python-embed/Lib/site-packages/pip*.dist-info

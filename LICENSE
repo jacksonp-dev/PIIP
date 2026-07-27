@@ -1,0 +1,45 @@
+PIIP — Personal Investment Intelligence Platform
+Copyright (c) 2026 [Your Name]. All Rights Reserved.
+
+This repository is made publicly VIEWABLE and RUNNABLE for personal, non-commercial use, under
+the following terms. This is a source-available license, not an open-source license — it is
+intentionally more restrictive than MIT, Apache, or GPL.
+
+1. PERMITTED
+   - Viewing the source code.
+   - Cloning or downloading the repository and running it, unmodified, on your own machine, for
+     your own personal, non-commercial research and paper-trading use, with your own API keys and
+     your own local data.
+   - Submitting bug reports, issues, and feedback through this repository's public issue tracker.
+
+2. NOT PERMITTED, without the copyright holder's prior written permission
+   - Modifying the source code and distributing or publishing that modified version (a "fork" for
+     private local tinkering is not itself a violation, but sharing, publishing, or distributing
+     any modified copy is).
+   - Redistributing this software, in original or modified form, to any other person or through
+     any other channel (another repository, a package index, a bundled product, etc.).
+   - Using this software, or any portion of its source code, in any other project — commercial or
+     non-commercial.
+   - Selling, sublicensing, or otherwise commercializing this software or any derivative of it.
+
+3. CONTRIBUTIONS AND FEEDBACK
+   Bug reports and feedback submitted through this repository's issue tracker are welcome and
+   appreciated. Submitting a bug report or feedback does not grant the submitter any ownership,
+   license, or usage rights to this software, and does not obligate the copyright holder to act
+   on it. Code changes remain in-house — this project is not currently accepting pull requests
+   or external code contributions.
+
+4. NO WARRANTY
+   THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+   BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+   NONINFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR
+   OTHER LIABILITY ARISING FROM THE USE OF THIS SOFTWARE.
+
+5. NOT FINANCIAL ADVICE
+   This software is a research and paper-trading (simulated) tool only. It does not execute real
+   trades and does not provide financial, investment, or trading advice. Nothing produced by this
+   software should be relied upon for real financial decisions. Data may be incomplete, delayed,
+   estimated, or wrong — see the application's own in-app disclaimers for specifics on known gaps.
+
+For permission requests beyond what's granted above (e.g. to use part of this code in another
+project, or to redistribute a modified version), contact the copyright holder directly.
