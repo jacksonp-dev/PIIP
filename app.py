@@ -77,6 +77,21 @@ def _tile_style(emoji: str) -> dict:
 _TEXT_BY_EMOJI = {"🟢": "#79ed8e", "🟡": "#fabf6b", "🔴": "#ff8080", "⚪": "#8b9a9d", "🔵": "#87d1ff"}
 
 
+def _esc(s) -> str:
+    """Escape free text before dropping it into raw HTML -- crucially turns $ into &#36; so a
+    dollar amount can't get misread as a LaTeX delimiter (st.markdown treats a $...$ pair as math
+    notation; AI-generated text is full of paired dollar amounts like "$1,000 start, now at $836",
+    which rendered as garbled italic math -- confirmed live on the Paper page's AI section)."""
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace("$", "&#36;"))
+
+
+def _md_safe(s) -> str:
+    """Same $-as-LaTeX fix as _esc(), for plain (non-HTML) st.markdown/st.caption calls -- markdown
+    treats a backslash-escaped \\$ as a literal dollar sign instead of a math delimiter."""
+    return str(s).replace("$", "\\$")
+
+
 def _render_kpi_tiles(s: dict, dpnl: dict | None):
     """Shared 6-tile KPI grid (Equity/Today/Realized P&L, Cash available/Open positions/
     Unrealized P&L) -- used by BOTH the Home page and the Paper tab's positions block
@@ -2833,7 +2848,8 @@ def _render_zero_dte(ticker: str):
                         client = agents.LLMClient(budget=agents.Budget(max_calls_per_run=5), dry_run=False)
                         out, cost = agents.zero_dte_agent_synthesis(
                             signals, client, user_question=zd_question.strip() or None)
-                        st.session_state[ai_0dte_key] = {"out": out, "cost": cost}
+                        st.session_state[ai_0dte_key] = {"out": out, "cost": cost,
+                                                         "question": zd_question.strip() or None}
                         st.toast(f"5-agent synthesis done — ${cost:.4f} spent.")
                     except Exception as e:
                         st.error(f"AI call failed: {e}")
@@ -2885,9 +2901,9 @@ def _render_zero_dte(ticker: str):
                 def _debate_col_html(title, dot, items, bg, border):
                     rows = "".join(
                         f'<div style="font-size:0.83rem;margin-bottom:0.5rem;padding-left:0.9rem;'
-                        f'border-left:2px solid #2a3a3c">{e}'
+                        f'border-left:2px solid #2a3a3c">{_esc(e)}'
                         f'<span style="font-family:ui-monospace,Consolas,monospace;font-size:0.68rem;'
-                        f'color:#8b9a9d;display:block;margin-top:0.1rem">— {name}</span></div>'
+                        f'color:#8b9a9d;display:block;margin-top:0.1rem">— {_esc(name)}</span></div>'
                         for name, e in items) or (
                         '<div style="font-size:0.82rem;color:#8b9a9d">No agent landed here this run.</div>')
                     return (f'<div style="background:{bg};border:1px solid {border};border-radius:8px;'
@@ -2916,6 +2932,30 @@ def _render_zero_dte(ticker: str):
                 if neutral_names:
                     st.caption(f"⚪ No strong lean this run: {', '.join(neutral_names)} "
                               f"({len(neutral_names)} of 5 agents didn't take a side).")
+
+                # Direct answers to the user's own question, one per agent that actually returned
+                # one -- shown LAST, after all the other agent context above, not first. Showing
+                # each agent's own answer (not a single blended one) is deliberate -- they can
+                # reasonably disagree, and that disagreement is itself useful, not noise to average away.
+                if zd_cached.get("question"):
+                    answers = [(name, a["user_question_answer"]) for name, a in o["agents"].items()
+                              if a.get("user_question_answer")]
+                    if answers:
+                        q_tile = _tile_style("🔵")
+                        rows = "".join(
+                            f'<div style="margin-bottom:0.5rem"><span style="font-family:ui-monospace,'
+                            f'Consolas,monospace;font-size:0.68rem;color:#8b9a9d">{_esc(name)}</span><br>'
+                            f'{_esc(ans)}</div>' for name, ans in answers)
+                        st.markdown(
+                            f'<div style="background:{q_tile["bg"]};border:1px solid {q_tile["border"]};'
+                            f'border-radius:10px;padding:0.9rem 1.1rem;margin-top:0.9rem">'
+                            f'<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;'
+                            f'color:{_TEXT_BY_EMOJI["🔵"]};font-weight:700;margin-bottom:0.5rem">'
+                            f'❓ Your question: "{_esc(zd_cached["question"])}"</div>{rows}</div>',
+                            unsafe_allow_html=True)
+                    else:
+                        st.caption("⚠️ None of the 5 agents returned a direct answer to your "
+                                  "question this run — try rephrasing it or click again.")
 
 
 if nav == "0DTE Intelligence":
@@ -3106,7 +3146,8 @@ if nav == "Paper":
                             client = agents.LLMClient(dry_run=False)
                             out, cost = agents.interpret_portfolio(
                                 s, client, user_question=pf_question.strip() or None)
-                            st.session_state["ai_portfolio"] = {"out": out, "cost": cost}
+                            st.session_state["ai_portfolio"] = {"out": out, "cost": cost,
+                                                                "question": pf_question.strip() or None}
                             st.toast(f"AI read done — ${cost:.4f} spent.")
                         except Exception as e:
                             st.error(f"AI call failed: {e}")
@@ -3114,13 +3155,71 @@ if nav == "Paper":
                 if pf_cached:
                     o = pf_cached["out"]
                     st.caption(f"Last run cost **${pf_cached['cost']:.4f}**")
-                    st.markdown(f"**Portfolio Agent:** {o.get('read') or o.get('summary') or '—'}")
+
+                    read_tile = _tile_style("🔵")
+                    st.markdown(
+                        f'<div style="background:{read_tile["bg"]};border:1px solid {read_tile["border"]};'
+                        f'border-radius:10px;padding:0.9rem 1.1rem;margin-bottom:0.6rem">'
+                        f'<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;'
+                        f'color:{_TEXT_BY_EMOJI["🔵"]};font-weight:700;margin-bottom:0.4rem">🤖 Portfolio Agent</div>'
+                        f'<div style="font-size:0.92rem;line-height:1.6;color:#e8ecec">'
+                        f'{_esc(o.get("read") or o.get("summary") or "—")}</div></div>',
+                        unsafe_allow_html=True)
+
+                    sr_cols = st.columns(2)
                     if o.get("strengths"):
-                        st.markdown("**Strengths:** " + "; ".join(o["strengths"]))
+                        g_tile = _tile_style("🟢")
+                        items = "".join(f'<div style="margin-bottom:0.3rem">✓ {_esc(x)}</div>'
+                                       for x in o["strengths"])
+                        with sr_cols[0]:
+                            st.markdown(
+                                f'<div style="background:{g_tile["bg"]};border:1px solid {g_tile["border"]};'
+                                f'border-radius:10px;padding:0.8rem 1rem;height:100%">'
+                                f'<div style="font-size:0.72rem;text-transform:uppercase;'
+                                f'letter-spacing:0.05em;color:{_TEXT_BY_EMOJI["🟢"]};font-weight:700;'
+                                f'margin-bottom:0.4rem">Strengths</div>'
+                                f'<div style="font-size:0.85rem;color:#e8ecec">{items}</div></div>',
+                                unsafe_allow_html=True)
                     if o.get("risks"):
-                        st.markdown("**Risks:** " + "; ".join(o["risks"]))
+                        r_tile = _tile_style("🔴")
+                        items = "".join(f'<div style="margin-bottom:0.3rem">✗ {_esc(x)}</div>'
+                                       for x in o["risks"])
+                        with sr_cols[1]:
+                            st.markdown(
+                                f'<div style="background:{r_tile["bg"]};border:1px solid {r_tile["border"]};'
+                                f'border-radius:10px;padding:0.8rem 1rem;height:100%">'
+                                f'<div style="font-size:0.72rem;text-transform:uppercase;'
+                                f'letter-spacing:0.05em;color:{_TEXT_BY_EMOJI["🔴"]};font-weight:700;'
+                                f'margin-bottom:0.4rem">Risks</div>'
+                                f'<div style="font-size:0.85rem;color:#e8ecec">{items}</div></div>',
+                                unsafe_allow_html=True)
                     if o.get("biggest_uncertainty"):
-                        st.warning(f"⚠️ Biggest uncertainty: {o['biggest_uncertainty']}")
+                        a_tile = _tile_style("🟡")
+                        st.markdown(
+                            f'<div style="background:{a_tile["bg"]};border:1px solid {a_tile["border"]};'
+                            f'border-radius:10px;padding:0.8rem 1rem;margin-top:0.6rem">'
+                            f'<span style="color:{_TEXT_BY_EMOJI["🟡"]};font-weight:700">'
+                            f'⚠️ Biggest uncertainty:</span> <span style="color:#e8ecec">'
+                            f'{_esc(o["biggest_uncertainty"])}</span></div>',
+                            unsafe_allow_html=True)
+
+                    # Direct answer to the user's own question, shown LAST -- after all the other
+                    # agent context above, not first.
+                    if pf_cached.get("question"):
+                        if o.get("user_question_answer"):
+                            aq_tile = _tile_style("🟡")
+                            st.markdown(
+                                f'<div style="background:{aq_tile["bg"]};border:1px solid '
+                                f'{aq_tile["border"]};border-radius:10px;padding:0.9rem 1.1rem;'
+                                f'margin-top:0.6rem"><div style="font-size:0.72rem;'
+                                f'text-transform:uppercase;letter-spacing:0.05em;'
+                                f'color:{_TEXT_BY_EMOJI["🟡"]};font-weight:700;margin-bottom:0.4rem">'
+                                f'❓ Your question: "{_esc(pf_cached["question"])}"</div>'
+                                f'<div style="color:#e8ecec">{_esc(o["user_question_answer"])}'
+                                f'</div></div>', unsafe_allow_html=True)
+                        else:
+                            st.caption("⚠️ The AI didn't return a direct answer to your question "
+                                      "this run — try rephrasing it or click again.")
     except Exception as e:
         st.error(f"Error: {e}")
 
@@ -3224,7 +3323,8 @@ if nav == "Research":
                                 for H, lfc in llm_fcs.items():
                                     lopt = baseline.simulated_option(spot, chains[H], lfc["stock_direction"])
                                     pred.log_if_new({**lfc, "spot": spot, **(lopt or {})}, DB)
-                                st.session_state[ai_key] = {"fcs": llm_fcs, "cost": cost, "outs": outs}
+                                st.session_state[ai_key] = {"fcs": llm_fcs, "cost": cost, "outs": outs,
+                                                            "question": ai_question.strip() or None}
                                 st.toast(f"AI interpretation done — ${cost:.4f} spent.")
                             except Exception as e:
                                 st.error(f"AI call failed: {e}")
@@ -3241,18 +3341,36 @@ if nav == "Research":
                             .get("reasoning", {})
                         st.markdown("**Executive Agent**")
                         if exec_reason.get("bull_factors"):
-                            st.markdown("🟢 " + "  \n🟢 ".join(exec_reason["bull_factors"]))
+                            st.markdown("🟢 " + "  \n🟢 ".join(_md_safe(x) for x in exec_reason["bull_factors"]))
                         if exec_reason.get("bear_factors"):
-                            st.markdown("🔴 " + "  \n🔴 ".join(exec_reason["bear_factors"]))
+                            st.markdown("🔴 " + "  \n🔴 ".join(_md_safe(x) for x in exec_reason["bear_factors"]))
                         st.divider()
                         st.markdown("**Specialist reads**")
                         for name in ("technical", "options", "skeptic"):
                             summ = cached["outs"].get(name, {}).get("summary")
                             if summ:
-                                st.markdown(f"**{name.title()} Agent:** {summ}")
+                                st.markdown(f"**{name.title()} Agent:** {_md_safe(summ)}")
                         if exec_reason.get("biggest_uncertainty"):
                             st.warning(f"⚠️ Executive Agent — biggest uncertainty: "
-                                      f"{exec_reason['biggest_uncertainty']}")
+                                      f"{_md_safe(exec_reason['biggest_uncertainty'])}")
+
+                        # Direct answer to the user's own question, shown LAST -- after all the
+                        # other agent context above, not first.
+                        if cached.get("question"):
+                            if exec_reason.get("user_question_answer"):
+                                q_tile = _tile_style("🔵")
+                                st.markdown(
+                                    f'<div style="background:{q_tile["bg"]};border:1px solid '
+                                    f'{q_tile["border"]};border-radius:10px;padding:0.9rem 1.1rem;'
+                                    f'margin-top:0.9rem"><div style="font-size:0.72rem;'
+                                    f'text-transform:uppercase;letter-spacing:0.05em;'
+                                    f'color:{_TEXT_BY_EMOJI["🔵"]};font-weight:700;margin-bottom:0.4rem">'
+                                    f'❓ Your question: "{_esc(cached["question"])}"</div>'
+                                    f'<div style="color:#e8ecec">{_esc(exec_reason["user_question_answer"])}'
+                                    f'</div></div>', unsafe_allow_html=True)
+                            else:
+                                st.caption("⚠️ The AI didn't return a direct answer to your question "
+                                          "this run — try rephrasing it or click again.")
 
             with st.container(border=True):
                 st.subheader("Options — nearest ~30-day expiry")
@@ -3449,7 +3567,8 @@ if nav == "Deep Research":
                                 client = agents.LLMClient(dry_run=False)
                                 out, cost = agents.interpret_dossier(
                                     D, client, user_question=dr_question.strip() or None)
-                                st.session_state[dr_ai_key] = {"out": out, "cost": cost}
+                                st.session_state[dr_ai_key] = {"out": out, "cost": cost,
+                                                               "question": dr_question.strip() or None}
                                 st.toast(f"AI read done — ${cost:.4f} spent.")
                             except Exception as e:
                                 st.error(f"AI call failed: {e}")
@@ -3458,11 +3577,29 @@ if nav == "Deep Research":
                         o = dr_cached["out"]
                         st.caption(f"Last run cost **${dr_cached['cost']:.4f}**")
                         st.markdown("**Research Agent**")
-                        st.markdown(f"**Bull case:** {o.get('bull_case', '—')}")
-                        st.markdown(f"**Bear case:** {o.get('bear_case', '—')}")
+                        st.markdown(f"**Bull case:** {_md_safe(o.get('bull_case', '—'))}")
+                        st.markdown(f"**Bear case:** {_md_safe(o.get('bear_case', '—'))}")
                         if o.get("biggest_uncertainty"):
-                            st.warning(f"⚠️ Biggest uncertainty: {o['biggest_uncertainty']}")
+                            st.warning(f"⚠️ Biggest uncertainty: {_md_safe(o['biggest_uncertainty'])}")
                         st.caption(f"Confidence: {o.get('confidence', '—')}")
+
+                        # Direct answer to the user's own question, shown LAST -- after all the
+                        # other agent context above, not first.
+                        if dr_cached.get("question"):
+                            if o.get("user_question_answer"):
+                                q_tile = _tile_style("🔵")
+                                st.markdown(
+                                    f'<div style="background:{q_tile["bg"]};border:1px solid '
+                                    f'{q_tile["border"]};border-radius:10px;padding:0.9rem 1.1rem;'
+                                    f'margin-top:0.9rem"><div style="font-size:0.72rem;'
+                                    f'text-transform:uppercase;letter-spacing:0.05em;'
+                                    f'color:{_TEXT_BY_EMOJI["🔵"]};font-weight:700;margin-bottom:0.4rem">'
+                                    f'❓ Your question: "{_esc(dr_cached["question"])}"</div>'
+                                    f'<div style="color:#e8ecec">{_esc(o["user_question_answer"])}'
+                                    f'</div></div>', unsafe_allow_html=True)
+                            else:
+                                st.caption("⚠️ The AI didn't return a direct answer to your question "
+                                          "this run — try rephrasing it or click again.")
 
 # ─────────────────────────── Ticker Page ───────────────────────────
 if nav == "Ticker Page":
@@ -3577,10 +3714,6 @@ if nav == "Glossary":
     st.caption("Every term on the platform, in plain English with examples. Hover the ⓘ icons and column "
                "headers anywhere in the app for the short version — this tab is the full reference.")
     q = st.text_input("🔎 Search terms", "", key="gloss_search").strip().lower()
-
-    def _esc(s):  # escape for raw HTML — crucially turns $ into &#36; so it can't render as LaTeX
-        return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                .replace("$", "&#36;"))
 
     shown_any = False
     for category, terms in glossary.GLOSSARY_GROUPS:

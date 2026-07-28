@@ -28,12 +28,21 @@ def _append_user_question(prompt: str, user_question: str | None) -> str:
     """Appends the user's own optional free-text question to a prompt -- used by every AI section
     in the app (Research/Deep Research/Paper/0DTE) so someone can ask something specific without a
     new call shape per page. Explicitly scoped to the SAME data already in the prompt -- this is
-    not a general-purpose chat box, it's a lens on the numbers already shown."""
+    not a general-purpose chat box, it's a lens on the numbers already shown.
+
+    Critically, this ALSO tells the model to add a dedicated "user_question_answer" field to its
+    JSON -- a first version just appended the question as a soft aside with no schema slot for the
+    answer, and confirmed live: every response schema here is a strict, itemized JSON contract, so
+    the model just kept filling its normal fields and never surfaced a direct answer anywhere the
+    UI could find it. A named field is a real place for the answer to live, not a hope that it
+    surfaces somewhere inside key_evidence/summary/etc."""
     if not user_question:
         return prompt
     return (prompt + f'\n\nThe user also specifically asked: "{user_question}"\n'
-            "Address this if relevant, using ONLY the data already provided above -- never invent "
-            "information beyond it. If the data can't answer it, say so plainly rather than guessing.")
+            "Answer this DIRECTLY and explicitly -- using ONLY the data already provided above, "
+            "never invent information beyond it, and say so plainly if the data can't answer it. "
+            'Add one more field to your JSON response: "user_question_answer" containing that '
+            "direct answer (2-3 sentences).")
 
 
 def _parse(text: str) -> dict:
@@ -291,6 +300,7 @@ def run_ticker(ticker, prices, spot, chains: dict, det_forecasts: dict, client: 
             "stock_prob_up": e.get("prob_up"), "confidence": e.get("confidence"),
             "reasoning": {"bull_factors": ex.get("bull_factors"), "bear_factors": ex.get("bear_factors"),
                           "biggest_uncertainty": ex.get("biggest_uncertainty"), "sources": ex.get("sources"),
+                          "user_question_answer": ex.get("user_question_answer"),
                           "specialists": {k: v.get("summary") for k, v in outs.items()}},
         }
     return forecasts, total, outs
