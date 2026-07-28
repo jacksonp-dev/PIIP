@@ -2781,6 +2781,10 @@ def _render_zero_dte(ticker: str):
                       "descriptive lean, not a trade recommendation. Real spend, ~$0.03–0.05/run "
                       "(5 calls), governed by a $3/day · $0.15/run · 5-call cap.")
             ai_0dte_key = f"ai_0dte_{ticker}"
+            zd_question = st.text_input(
+                "Anything specific you want the agents to consider? (optional)",
+                key=f"ai_0dte_q_{ticker}",
+                placeholder="e.g. Does this change if I'm only looking at the next hour?")
             if st.button("🤖 Run 5-agent synthesis", key=f"ai_0dte_btn_{ticker}"):
                 with st.spinner("Running 5 Claude calls…"):
                     try:
@@ -2827,7 +2831,8 @@ def _render_zero_dte(ticker: str):
                                      "rsp_vs_spy": {"rsp_chg": rsp_chg, "spy_chg": spy_chg}},
                         }
                         client = agents.LLMClient(budget=agents.Budget(max_calls_per_run=5), dry_run=False)
-                        out, cost = agents.zero_dte_agent_synthesis(signals, client)
+                        out, cost = agents.zero_dte_agent_synthesis(
+                            signals, client, user_question=zd_question.strip() or None)
                         st.session_state[ai_0dte_key] = {"out": out, "cost": cost}
                         st.toast(f"5-agent synthesis done — ${cost:.4f} spent.")
                     except Exception as e:
@@ -2899,6 +2904,18 @@ def _render_zero_dte(ticker: str):
                 with dcol2:
                     st.markdown(_debate_col_html("The case AGAINST", "🔴", against_items,
                                                  "#1d1212", "#5a2c2c"), unsafe_allow_html=True)
+
+                # Neutral agents contribute nothing to either column above (correctly -- a "no
+                # side taken" call has no evidence for a debate), but silently dropping them made
+                # a run where most agents declined to guess (stale/pre-market data, etc.) look like
+                # only 1 of 5 agents had responded at all (confirmed live -- a real "why does the
+                # FOR column say 0" confusion, not an actual computation bug). Naming them here
+                # makes clear all 5 calls ran.
+                neutral_names = [name for name, a in o["agents"].items()
+                                 if a["recommended_bias"] == "Neutral"]
+                if neutral_names:
+                    st.caption(f"⚪ No strong lean this run: {', '.join(neutral_names)} "
+                              f"({len(neutral_names)} of 5 agents didn't take a side).")
 
 
 if nav == "0DTE Intelligence":
@@ -3079,11 +3096,16 @@ if nav == "Paper":
                           "commentary, not a trade recommendation. Never invents numbers; reasons "
                           "only from the account state above. Real spend, ~$0.01/run, same cost "
                           "caps as the Research page's AI section.")
+                pf_question = st.text_input(
+                    "Anything specific you want the agent to consider? (optional)",
+                    key="ai_portfolio_q",
+                    placeholder="e.g. Am I too concentrated in one ticker right now?")
                 if st.button("🤖 Get an AI read on my account", key="ai_portfolio_btn"):
                     with st.spinner("Running 1 Claude call…"):
                         try:
                             client = agents.LLMClient(dry_run=False)
-                            out, cost = agents.interpret_portfolio(s, client)
+                            out, cost = agents.interpret_portfolio(
+                                s, client, user_question=pf_question.strip() or None)
                             st.session_state["ai_portfolio"] = {"out": out, "cost": cost}
                             st.toast(f"AI read done — ${cost:.4f} spent.")
                         except Exception as e:
@@ -3188,12 +3210,17 @@ if nav == "Research":
                               "🎯 Scorecard and graded against the deterministic baseline above — the "
                               "AI is on trial, not trusted by default.")
                     ai_key = f"ai_interp_{ticker}"
+                    ai_question = st.text_input(
+                        "Anything specific you want the agents to consider? (optional)",
+                        key=f"ai_q_{ticker}",
+                        placeholder="e.g. How does this look for a 2-week hold specifically?")
                     if st.button("🤖 Run AI interpretation (~$0.02–0.03)", key=f"ai_btn_{ticker}"):
                         with st.spinner("Running 4 Claude calls…"):
                             try:
                                 client = agents.LLMClient(dry_run=False)
                                 llm_fcs, cost, outs = agents.run_ticker(
-                                    ticker, prices, spot, chains, det_fcs, client)
+                                    ticker, prices, spot, chains, det_fcs, client,
+                                    user_question=ai_question.strip() or None)
                                 for H, lfc in llm_fcs.items():
                                     lopt = baseline.simulated_option(spot, chains[H], lfc["stock_direction"])
                                     pred.log_if_new({**lfc, "spot": spot, **(lopt or {})}, DB)
@@ -3412,11 +3439,16 @@ if nav == "Deep Research":
                               "own confidence/source. Real spend, ~$0.01/run, same cost caps as "
                               "the Research page's AI section.")
                     dr_ai_key = f"ai_dossier_{tk_show}"
+                    dr_question = st.text_input(
+                        "Anything specific you want the agent to consider? (optional)",
+                        key=f"ai_dossier_q_{tk_show}",
+                        placeholder="e.g. How much of the bull case depends on the pipeline data specifically?")
                     if st.button("🤖 Get AI read on this dossier", key=f"ai_dossier_btn_{tk_show}"):
                         with st.spinner("Running 1 Claude call…"):
                             try:
                                 client = agents.LLMClient(dry_run=False)
-                                out, cost = agents.interpret_dossier(D, client)
+                                out, cost = agents.interpret_dossier(
+                                    D, client, user_question=dr_question.strip() or None)
                                 st.session_state[dr_ai_key] = {"out": out, "cost": cost}
                                 st.toast(f"AI read done — ${cost:.4f} spent.")
                             except Exception as e:

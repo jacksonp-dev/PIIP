@@ -24,6 +24,18 @@ _SYS = (
 )
 
 
+def _append_user_question(prompt: str, user_question: str | None) -> str:
+    """Appends the user's own optional free-text question to a prompt -- used by every AI section
+    in the app (Research/Deep Research/Paper/0DTE) so someone can ask something specific without a
+    new call shape per page. Explicitly scoped to the SAME data already in the prompt -- this is
+    not a general-purpose chat box, it's a lens on the numbers already shown."""
+    if not user_question:
+        return prompt
+    return (prompt + f'\n\nThe user also specifically asked: "{user_question}"\n'
+            "Address this if relevant, using ONLY the data already provided above -- never invent "
+            "information beyond it. If the data can't answer it, say so plainly rather than guessing.")
+
+
 def _parse(text: str) -> dict:
     try:
         return json.loads(text)
@@ -75,11 +87,13 @@ class LLMClient:
         return _parse(text), cost
 
 
-def _specialist(client: LLMClient, name: str, instruction: str, metrics: dict) -> tuple[dict, float]:
+def _specialist(client: LLMClient, name: str, instruction: str, metrics: dict,
+                user_question: str | None = None) -> tuple[dict, float]:
     user = (f"{instruction}\nCOMPUTED METRICS (interpret, do not recompute):\n"
             f"{json.dumps(metrics, default=str)}\n"
             'Return JSON: {"agent","confidence","bull_factors":[],"bear_factors":[],'
             '"biggest_uncertainty","summary"}')
+    user = _append_user_question(user, user_question)
     out, cost = client.call(user)
     if out is None:  # dry run
         out = {"agent": name, "confidence": 0.5, "bull_factors": ["dry-run"], "bear_factors": [],
@@ -113,7 +127,7 @@ def anonymized_forecast(metrics: dict, client: LLMClient, horizons=(7, 30, 90)):
     return fcs, cost
 
 
-def interpret_dossier(dossier: dict, client: LLMClient) -> tuple[dict, float]:
+def interpret_dossier(dossier: dict, client: LLMClient, user_question: str | None = None) -> tuple[dict, float]:
     """ONE call: interpret an already-built Deep Research dossier (fundamentals, clinical trials,
     SEC catalysts, confidence-scored fields) for educational research -- never invents numbers,
     only reasons over what's already fetched. Lighter than run_ticker()'s 4-call pipeline since a
@@ -125,6 +139,7 @@ def interpret_dossier(dossier: dict, client: LLMClient) -> tuple[dict, float]:
             f"DOSSIER:\n{json.dumps(dossier, default=str)}\n"
             'Return ONLY JSON: {"bull_case","bear_case","biggest_uncertainty","confidence",'
             '"summary"}')
+    user = _append_user_question(user, user_question)
     out, cost = client.call(user)
     if out is None:  # dry run
         out = {"bull_case": "dry-run", "bear_case": "dry-run",
@@ -132,7 +147,7 @@ def interpret_dossier(dossier: dict, client: LLMClient) -> tuple[dict, float]:
     return out, cost
 
 
-def interpret_portfolio(account: dict, client: LLMClient) -> tuple[dict, float]:
+def interpret_portfolio(account: dict, client: LLMClient, user_question: str | None = None) -> tuple[dict, float]:
     """ONE call: a plain-English read on how the PAPER (practice) account is actually doing, from
     numbers already computed by portfolio.summary() -- coaching commentary, not a trade
     recommendation, and never invents stats not present in the input. `account` is portfolio.
@@ -146,6 +161,7 @@ def interpret_portfolio(account: dict, client: LLMClient) -> tuple[dict, float]:
             "not recommend specific trades.\n"
             f"ACCOUNT:\n{json.dumps(trimmed, default=str)}\n"
             'Return ONLY JSON: {"read","strengths":[],"risks":[],"biggest_uncertainty","summary"}')
+    user = _append_user_question(user, user_question)
     out, cost = client.call(user)
     if out is None:  # dry run
         out = {"read": "dry-run", "strengths": [], "risks": [],
@@ -175,7 +191,8 @@ ZERO_DTE_AGENTS = [
 ]
 
 
-def _zero_dte_agent_call(name: str, instruction: str, signals: dict, client: LLMClient) -> tuple[dict, float]:
+def _zero_dte_agent_call(name: str, instruction: str, signals: dict, client: LLMClient,
+                         user_question: str | None = None) -> tuple[dict, float]:
     user = (f"You are the {name} in a 0DTE options RESEARCH tool (not a trading signal -- this "
             f"page's own backtest found its highest-confidence bucket statistically "
             f"indistinguishable from a coin flip / SPY's base rate). {instruction} Weigh the "
@@ -189,6 +206,7 @@ def _zero_dte_agent_call(name: str, instruction: str, signals: dict, client: LLM
             'Return ONLY JSON: {"bullish_score":0-100,"bearish_score":0-100,"confidence":0-100,'
             '"key_evidence":["...","...","..."],"invalidation":["..."],'
             '"trade_impact":"Low|Medium|High","recommended_bias":"Bullish|Bearish|Neutral"}')
+    user = _append_user_question(user, user_question)
     out, cost = client.call(user)
     if out is None:  # dry run
         out = {"bullish_score": 50, "bearish_score": 50, "confidence": 40,
@@ -197,7 +215,7 @@ def _zero_dte_agent_call(name: str, instruction: str, signals: dict, client: LLM
     return out, cost
 
 
-def zero_dte_agent_synthesis(signals: dict, client: LLMClient) -> tuple[dict, float]:
+def zero_dte_agent_synthesis(signals: dict, client: LLMClient, user_question: str | None = None) -> tuple[dict, float]:
     """5 weighted agent calls (see ZERO_DTE_AGENTS), each interpreting the SAME already-computed
     0DTE signals dict from its own focus area -- never fetches new data, never invents numbers.
     The final blended score/confidence is CODE-computed (a weighted average of each agent's own
@@ -208,7 +226,7 @@ def zero_dte_agent_synthesis(signals: dict, client: LLMClient) -> tuple[dict, fl
     with max_calls_per_run >= 5 -- the default cap is 4, sized for run_ticker()'s pipeline."""
     agents_out, total = {}, 0.0
     for name, weight, instruction in ZERO_DTE_AGENTS:
-        out, cost = _zero_dte_agent_call(name, instruction, signals, client)
+        out, cost = _zero_dte_agent_call(name, instruction, signals, client, user_question)
         agents_out[name] = {**out, "weight": weight}
         total += cost
 
@@ -221,8 +239,12 @@ def zero_dte_agent_synthesis(signals: dict, client: LLMClient) -> tuple[dict, fl
            "final_confidence": round(final_confidence, 1)}, total
 
 
-def run_ticker(ticker, prices, spot, chains: dict, det_forecasts: dict, client: LLMClient):
-    """3 specialists + 1 executive => per-horizon LLM forecasts. Returns (forecasts, cost, agent_outputs)."""
+def run_ticker(ticker, prices, spot, chains: dict, det_forecasts: dict, client: LLMClient,
+              user_question: str | None = None):
+    """3 specialists + 1 executive => per-horizon LLM forecasts. Returns (forecasts, cost, agent_outputs).
+    user_question (optional): the user's own free-text question, appended to every call so any
+    agent whose focus area is relevant can address it -- never a new data source, just a lens on
+    the same metrics."""
     total = 0.0
     tech = det.technical_metrics(prices)
     hists = {h: det.historical_move_distribution(prices, h) for h in det_forecasts}
@@ -231,13 +253,14 @@ def run_ticker(ticker, prices, spot, chains: dict, det_forecasts: dict, client: 
 
     outs = {}
     outs["technical"], c = _specialist(client, "technical",
-        "Interpret trend, momentum and volatility regime.", tech); total += c
+        "Interpret trend, momentum and volatility regime.", tech, user_question); total += c
     outs["options"], c = _specialist(client, "options",
         "Interpret IV, expected move and greeks. Flag theta bleed and IV-crush risk explicitly.",
-        opt_metrics or {}); total += c
+        opt_metrics or {}, user_question); total += c
     outs["skeptic"], c = _specialist(client, "skeptic",
         "DESTROY the bullish thesis. Assume the trend is a trap. Surface survivorship bias, missing "
-        "data, and the strongest bear case.", {"technical": tech, "options": opt_metrics, "hist": hists}); total += c
+        "data, and the strongest bear case.", {"technical": tech, "options": opt_metrics, "hist": hists},
+        user_question); total += c
 
     exec_input = {"specialists": outs,
                   "deterministic_baseline": det_forecasts,
@@ -248,6 +271,7 @@ def run_ticker(ticker, prices, spot, chains: dict, det_forecasts: dict, client: 
             f"metrics. INPUT:\n{json.dumps(exec_input, default=str)}\n"
             'Return JSON: {"7":{"direction","expected_move_pct","prob_up","confidence"},'
             '"30":{...},"90":{...},"bull_factors":[],"bear_factors":[],"biggest_uncertainty":"","sources":[]}')
+    user = _append_user_question(user, user_question)
     ex, c = client.call(user); total += c
     if ex is None:  # dry run -> echo deterministic so the pipeline produces a coherent record
         ex = {str(h): {"direction": det_forecasts[h]["stock_direction"],
