@@ -575,6 +575,19 @@ def get_rsp_vs_spy():
     return zd.fetch_daily_batch(tickers=["RSP", "SPY"], period="5d")
 
 
+# 1-hour TTL, not 300s like the price-driven macro batch above -- TGA/RRP/bank reserves update at
+# most daily and CPI/unemployment/payrolls only once a month, so refetching every 5 minutes would
+# just be repeated network calls for numbers that provably haven't changed since the last release.
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_liquidity_snapshot():
+    return macro.liquidity_snapshot()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_econ_releases():
+    return macro.economic_releases_snapshot()
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_company_info(tk):
     info = fundamentals.company_info(tk)
@@ -2781,7 +2794,65 @@ def _render_zero_dte(ticker: str):
                       "RSP lagging SPY means the move is concentrated in a handful of mega-caps, "
                       "not broad participation."] if rsp_chg is not None else ["Not enough data right now."])},
     ]}]
+
+    # Fed liquidity + real economic releases -- both fetched via macro.py's free, keyless FRED CSV
+    # export (same pattern already used above for nothing until now: liquidity_snapshot() and
+    # yield_curve_snapshot() were fully built in iip/macro.py but never actually called from any
+    # page). Its own group, not folded into "Macro Context" above -- that group is real-time-ish
+    # market proxies (yields/DXY/oil), this is monthly/quarterly-cadence Fed & economic data, a
+    # genuinely different update rhythm that deserves its own clearly-labeled section.
+    yc = macro.yield_curve_snapshot(mb)
+    liq = get_liquidity_snapshot()
+    econ = get_econ_releases()
+
+    def _liq_row(label, key, unit=""):
+        d = liq.get(key)
+        if not d:
+            return {"label": label, "value": "—", "color": "#8b9a9d",
+                   "context": "FRED data unavailable right now.", "evidence": ["No data returned."]}
+        chg = d.get("chg_1w")
+        return {"label": label, "value": f"{d['latest']:,.0f}{unit}",
+               "color": "#79ed8e" if (chg or 0) >= 0 else "#ff8080",
+               "context": f"{chg:+,.0f}{unit} vs a week ago" if chg is not None else f"As of {d['as_of']}",
+               "evidence": [f"As of {d['as_of']}", "Source: FRED (Federal Reserve Bank of St. Louis), "
+                           "free public CSV export, no API key."]}
+
+    econ_rows = []
+    cpi = econ.get("CPI")
+    econ_rows.append({
+        "label": "CPI (YoY)", "value": f"{cpi['yoy_pct']:+.2f}%" if cpi and cpi.get("yoy_pct") is not None else "—",
+        "color": "#87d1ff", "context": f"As of {cpi['as_of']}" if cpi else "FRED data unavailable right now.",
+        "evidence": ["Headline CPI, seasonally adjusted (FRED series CPIAUCSL).",
+                    "Real monthly release, not an estimate — updates once a month."] if cpi else ["No data returned."]})
+    unemp = econ.get("Unemployment Rate")
+    econ_rows.append({
+        "label": "Unemployment Rate", "value": f"{unemp['latest']:.1f}%" if unemp else "—",
+        "color": "#87d1ff", "context": f"As of {unemp['as_of']}" if unemp else "FRED data unavailable right now.",
+        "evidence": ["FRED series UNRATE — real monthly release, not an estimate."] if unemp else ["No data returned."]})
+    payrolls = econ.get("Nonfarm Payrolls")
+    pr_chg = payrolls.get("mom_change_thousands") if payrolls else None
+    econ_rows.append({
+        "label": "Nonfarm Payrolls (MoM)", "value": f"{pr_chg:+,.0f}K jobs" if pr_chg is not None else "—",
+        "color": "#79ed8e" if (pr_chg or 0) >= 0 else "#ff8080",
+        "context": f"As of {payrolls['as_of']}" if payrolls else "FRED data unavailable right now.",
+        "evidence": ["Change in total nonfarm employment vs the prior month (FRED series PAYEMS) — "
+                    "the actual 'jobs added' headline number."] if payrolls else ["No data returned."]})
+
+    fed_groups = [{"label": "🏦 Fed Liquidity & Economic Data", "rows": [
+        {"label": "Yield Curve (13W–10Y)",
+         "value": f"{yc['spread_13w_10y']:+.2f}pp" if yc.get("spread_13w_10y") is not None else "—",
+         "color": "#ff8080" if (yc.get("spread_13w_10y") or 0) < 0 else "#87d1ff",
+         "context": "Negative (inverted) has historically preceded recessions, with a long and variable lag",
+         "evidence": ["10Y minus 13-week yield — the classic 2s10s spread isn't buildable here "
+                     "(no free 2Y yield series exists), this is the closest free equivalent.",
+                     "A single day's reading is noisy — the trend over weeks matters more than any one print."]},
+        _liq_row("Treasury General Account", "TGA", "M"),
+        _liq_row("Reverse Repo Usage", "RRP", "B"),
+        _liq_row("Bank Reserves", "bank_reserves", "M"),
+        *econ_rows,
+    ]}]
     _render_list_view(macro_groups, container_key="zd_macro_rows")
+    _render_list_view(fed_groups, container_key="zd_fed_rows")
 
     with st.container(border=True):
         st.subheader("🤖 5-agent AI synthesis (optional, real spend)")

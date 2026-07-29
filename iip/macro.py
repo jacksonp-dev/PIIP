@@ -98,3 +98,48 @@ def yield_curve_snapshot(batch: dict[str, pd.DataFrame] | None = None) -> dict:
     else:
         out["spread_13w_10y"] = None
     return out
+
+
+# The "big 3" market-moving macro prints -- deliberately NOT the full FRED catalog (Core CPI/PCE/
+# GDP etc. are real and could be added the same way later) to keep this addition scoped to what
+# actually moves markets on release day, not an exhaustive econ-data dump.
+ECON_RELEASE_SERIES = {
+    "CPI": "CPIAUCSL",              # headline CPI index level -- quoted as YoY % change
+    "Unemployment Rate": "UNRATE",   # already a %, quoted as-is
+    "Nonfarm Payrolls": "PAYEMS",    # jobs level in thousands -- quoted as the MoM change (\"jobs added\")
+}
+
+
+def _fred_yoy_pct(df: pd.DataFrame) -> float | None:
+    """% change vs the observation ~12 months back -- how CPI/PCE-style price indices are always
+    actually quoted in headlines ('CPI rose 3.2%'), not their raw index level."""
+    if df is None or df.empty:
+        return None
+    latest_date, latest_val = df["date"].iloc[-1], float(df["value"].iloc[-1])
+    prior = df[df["date"] <= latest_date - pd.DateOffset(months=12)]
+    if prior.empty:
+        return None
+    return round((latest_val / float(prior["value"].iloc[-1]) - 1) * 100, 2)
+
+
+def economic_releases_snapshot() -> dict:
+    """Latest real macro releases from FRED's free CSV export -- same keyless pattern already
+    used by liquidity_snapshot() above, just extended to the headline inflation/jobs prints.
+    CPI is quoted as YoY % (what the number means in every headline); unemployment as its own
+    level; payrolls as the month-over-month change (the actual 'jobs added' headline number, not
+    the raw employment level, which is a huge number that means nothing on its own)."""
+    out = {}
+    for label, sid in ECON_RELEASE_SERIES.items():
+        df = fetch_fred_series(sid)
+        if df is None or df.empty:
+            out[label] = None
+            continue
+        latest_val = float(df["value"].iloc[-1])
+        entry = {"latest": latest_val, "as_of": df["date"].iloc[-1].strftime("%Y-%m-%d")}
+        if label == "CPI":
+            entry["yoy_pct"] = _fred_yoy_pct(df)
+        elif label == "Nonfarm Payrolls":
+            entry["mom_change_thousands"] = (round(latest_val - float(df["value"].iloc[-2]), 1)
+                                             if len(df) >= 2 else None)
+        out[label] = entry
+    return out

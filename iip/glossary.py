@@ -144,6 +144,29 @@ GLOSSARY: dict[str, str] = {
     "Equal-Weight vs Cap-Weight": "Compares RSP (equal-weight S&P 500) to SPY (cap-weight) on the day. RSP "
                                  "lagging SPY means the move is concentrated in a few mega-caps, not broad "
                                  "participation.",
+    "Yield Curve (13W–10Y)": "10-Year Treasury yield minus the 13-week yield. Negative (inverted) has "
+                            "historically preceded recessions, with a long and variable lag — not a "
+                            "short-term timing signal. The classic '2s10s' spread needs a free 2-year "
+                            "yield series that doesn't exist here, so this is the closest free equivalent.",
+    "Treasury General Account": "The U.S. Treasury's own checking account at the Fed. When it rises, cash is "
+                                "being drained OUT of the banking system (Treasury issuing debt faster than "
+                                "spending); when it falls, cash flows back IN — a real liquidity driver, not "
+                                "a directional signal on its own.",
+    "Reverse Repo Usage": "Cash parked overnight at the Fed by money-market funds/banks in exchange for "
+                          "Treasury collateral. High usage means idle cash sitting on the sidelines earning a "
+                          "safe return instead of flowing into risk assets; falling usage can mean that cash "
+                          "is being redeployed elsewhere.",
+    "Bank Reserves": "Cash balances banks hold at the Fed. The broadest gauge of how much liquidity is "
+                     "actually in the banking system — persistently falling reserves is one of the things "
+                     "that has historically preceded funding-market stress.",
+    "CPI (YoY)": "Consumer Price Index — the headline inflation number, quoted as % change vs 12 months ago "
+                "(the number every 'inflation is X%' headline actually means). A real monthly government "
+                "release, not an estimate.",
+    "Nonfarm Payrolls (MoM)": "The actual 'jobs added' headline number — change in total U.S. employment vs "
+                             "the prior month. A real monthly government release (the 'jobs report'), not an "
+                             "estimate.",
+    "Unemployment Rate": "% of the labor force that's unemployed and actively looking for work. A real "
+                         "monthly government release, released the same day as Nonfarm Payrolls.",
     "Market DNA": "A same-session classification of today's day-type (Range Bound, Trend Day, Gap & Go, etc.) "
                  "built from gap behavior, range vs normal, and how one-sided price has stayed vs VWAP.",
     "Session Length": "How many minutes of today's session have printed so far — Market DNA needs at least 30 "
@@ -362,6 +385,13 @@ GLOSSARY_GROUPS: list = [
          "(context for Energy-sector moves), Put/Call OI Ratio (call-heavy vs put-heavy positioning — noisier than "
          "Dealer Positioning), and Equal-Weight (RSP) vs Cap-Weight (SPY) — RSP lagging SPY means the move is "
          "concentrated in a few mega-caps, not broad participation."),
+        ("Fed Liquidity & Economic Data", "Real, unmodified releases from FRED (Federal Reserve Bank of St. "
+         "Louis) — the same free source professional macro research uses, fetched with no API key. Yield "
+         "Curve (13W-10Y) — inversion has historically preceded recessions, with a long and variable lag. "
+         "Treasury General Account / Reverse Repo / Bank Reserves — the Fed's own liquidity plumbing; falling "
+         "reserves and a draining RRP facility are things that have historically preceded funding-market "
+         "stress. CPI (YoY) and Nonfarm Payrolls (MoM) — the actual monthly inflation and jobs prints, "
+         "updated once a month/quarter as real data becomes available, not daily estimates."),
     ]),
     ("Market DNA (day-type read)", [
         ("Market DNA", "A same-session classification of today's day-type — Range Bound, Trend Day, Gap & Go, etc. "
