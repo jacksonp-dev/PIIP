@@ -199,6 +199,42 @@ ZERO_DTE_AGENTS = [
      "read. Be honest -- and score accordingly -- when the case for a trade is weak."),
 ]
 
+# Conclusion-shaped fields -- the deterministic engine's own downstream BLEND of everything else
+# (trade_confidence and entry_quality are weighted composites; bias_direction and confluence
+# summarize what other signals already agree on). Shown to NO agent, including the Skeptic --
+# confirmed live: with these included, every one of the 5 agents just read the pre-computed
+# answer off the page and parroted it back with different wording instead of reasoning
+# independently from the underlying signals, which defeats the entire point of running 5 calls.
+_ZERO_DTE_ANSWER_FIELDS = ("trade_confidence", "bias_direction", "confluence", "entry_quality")
+
+
+def zero_dte_scoped_signals(signals: dict, name: str) -> dict:
+    """Each agent gets ONLY the raw signals relevant to its own named focus area, not the full
+    dict -- the second half of the same fix as _ZERO_DTE_ANSWER_FIELDS above. Confirmed live:
+    without this, a 'News & Catalyst' read and a 'Technical' read cited the identical breadth/
+    momentum numbers, because every agent could see every OTHER agent's raw material too. Skeptic
+    is the one deliberate exception -- finding holes anywhere is its whole job, so it keeps the
+    full picture (still with the conclusion fields scrubbed above, so it can't just read the
+    answer off the page either)."""
+    common = {"ticker": signals.get("ticker"), "session_timing": signals.get("session_timing")}
+    macro_sig = signals.get("macro") or {}
+    if name == "News & Catalyst Agent":
+        return {**common, "market_dna": signals.get("market_dna")}
+    if name == "Technical & Market Structure Agent":
+        return {**common, "market_bias": signals.get("market_bias"), "breadth": signals.get("breadth"),
+               "momentum": signals.get("momentum"), "reversal_risk_pct": signals.get("reversal_risk_pct")}
+    if name == "Options & Positioning Agent":
+        return {**common, "options_health": signals.get("options_health"),
+               "dealer_positioning": signals.get("dealer_positioning"),
+               "put_call_oi_ratio": macro_sig.get("put_call_oi_ratio")}
+    if name == "Macro & Cross-Asset Agent":
+        return {**common, "10y_yield": macro_sig.get("10y_yield"), "dxy": macro_sig.get("dxy"),
+               "wti": macro_sig.get("wti"), "rsp_vs_spy": macro_sig.get("rsp_vs_spy"),
+               "sector_health_pct": signals.get("sector_health_pct"),
+               "mega_cap_health": signals.get("mega_cap_health")}
+    # Skeptic / Risk Agent: everything except the conclusion-shaped fields
+    return {k: v for k, v in signals.items() if k not in _ZERO_DTE_ANSWER_FIELDS}
+
 
 def _zero_dte_agent_call(name: str, instruction: str, signals: dict, client: LLMClient,
                          user_question: str | None = None) -> tuple[dict, float]:
@@ -225,8 +261,9 @@ def _zero_dte_agent_call(name: str, instruction: str, signals: dict, client: LLM
 
 
 def zero_dte_agent_synthesis(signals: dict, client: LLMClient, user_question: str | None = None) -> tuple[dict, float]:
-    """5 weighted agent calls (see ZERO_DTE_AGENTS), each interpreting the SAME already-computed
-    0DTE signals dict from its own focus area -- never fetches new data, never invents numbers.
+    """5 weighted agent calls (see ZERO_DTE_AGENTS), each interpreting ONLY its own scoped slice
+    of the 0DTE signals (see zero_dte_scoped_signals) -- never fetches new data, never invents
+    numbers, and never sees the deterministic engine's own already-computed conclusion fields.
     The final blended score/confidence is CODE-computed (a weighted average of each agent's own
     0-100 scores), never invented by any single call -- same 'deterministic engine computes, AI
     only interprets' rule used everywhere else in this app. Heavier than the other pages' 1-call
@@ -235,7 +272,8 @@ def zero_dte_agent_synthesis(signals: dict, client: LLMClient, user_question: st
     with max_calls_per_run >= 5 -- the default cap is 4, sized for run_ticker()'s pipeline."""
     agents_out, total = {}, 0.0
     for name, weight, instruction in ZERO_DTE_AGENTS:
-        out, cost = _zero_dte_agent_call(name, instruction, signals, client, user_question)
+        scoped = zero_dte_scoped_signals(signals, name)
+        out, cost = _zero_dte_agent_call(name, instruction, scoped, client, user_question)
         agents_out[name] = {**out, "weight": weight}
         total += cost
 
