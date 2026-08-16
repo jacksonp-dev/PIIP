@@ -431,7 +431,12 @@ def contract_quote(chain: dict, spot: float, strike: float, direction: str) -> d
     # a % of strike, with an ITM/OTM label per the contract's own direction.
     dist_pct = round(abs(spot - matched_strike) / matched_strike * 100, 2) if matched_strike else None
     is_itm = (spot > matched_strike) if direction == "CALL" else (spot < matched_strike)
-    moneyness_label = f"{dist_pct}% {'ITM' if is_itm else 'OTM'}" if dist_pct is not None else None
+    if dist_pct is None:
+        moneyness_label = None
+    elif dist_pct == 0:
+        moneyness_label = "ATM"   # PIIP audit 2026-08 (accounting pass): was always "0.0% OTM"
+    else:
+        moneyness_label = f"{dist_pct}% {'ITM' if is_itm else 'OTM'}"
 
     # Last-trade age (PIIP audit 2026-08, Batch 1 / Phase 18): yfinance's `lastTradeDate` is when
     # this SPECIFIC contract last actually traded -- NOT a live bid/ask timestamp (yfinance quotes
@@ -725,7 +730,15 @@ def time_of_day_relative_volume(historical_5m: pd.DataFrame | None,
     if hist.empty:
         return None
     hist = hist.sort_index()
-    hist["minutes"] = hist.groupby("date").cumcount() * 5
+    # PIIP audit 2026-08 (accounting pass): was `groupby("date").cumcount() * 5`, which assumes
+    # every historical day has perfectly regular, gapless 5m bars starting exactly at session
+    # open -- a real data gap, early-close day, or irregular first-bar timing would silently
+    # misalign that day's "minutes since open", corrupting the baseline average it feeds into.
+    # Derived from the actual elapsed time since each day's own first bar instead, robust to gaps.
+    def _minutes_since_open(g):
+        elapsed = (g.index - g.index[0]).total_seconds() / 60
+        return pd.Series((elapsed / 5).round() * 5, index=g.index)
+    hist["minutes"] = hist.groupby("date", group_keys=False).apply(_minutes_since_open)
     hist["cum_vol"] = hist.groupby("date")["Volume"].cumsum()
 
     today_minutes = (today_intraday.index[-1] - today_intraday.index[0]).total_seconds() / 60

@@ -106,8 +106,14 @@ def timeframe_alignment(snapshot: dict) -> dict:
         return {"agree": 0, "total": 0, "aligned_direction": "Unknown", "alignment_pct": 0.0,
                 "checks": [], "skipped": skipped,
                 "note": "No timeframe has enough of today's session printed yet."}
-    aligned_direction = "Bullish" if bulls >= bears and bulls > 0 else \
-                        "Bearish" if bears > bulls else "Mixed"
+    # PIIP audit 2026-08 (accounting pass): was `bulls >= bears`, which silently called an exact
+    # tie "Bullish" instead of "Mixed". A true tie can never push alignment_pct above 50% (total is
+    # always >= 2x the tied count), so update_trend_state()'s 60% threshold was never fooled by
+    # this -- but confluence_score()'s "Multi-timeframe alignment agrees" check compares against
+    # this label directly, so a real tie could still be counted as false agreement there. Strict
+    # `>` on both sides falls through to "Mixed" for ties (including 0-0), with no other behavior
+    # change for genuine majorities.
+    aligned_direction = "Bullish" if bulls > bears else "Bearish" if bears > bulls else "Mixed"
     agree = bulls if aligned_direction == "Bullish" else \
             bears if aligned_direction == "Bearish" else max(bulls, bears)
     checks = [(label, v["direction"], v["direction"] == aligned_direction)

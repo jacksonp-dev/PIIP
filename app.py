@@ -2608,11 +2608,19 @@ def _render_zero_dte(ticker: str):
     historical_5m = zd_fetch_historical_5m(ticker)
     tod_rel_vol = zd.time_of_day_relative_volume(historical_5m, intraday.get(ticker))
 
-    try:
-        zdlog.log_signal_snapshot(ticker, bias, confidence, entry, momentum, reversal, alignment,
-                                  trend_state, spot_price=snap["last"], day_regime=regime["state"])
-    except Exception:
-        pass  # calibration logging is best-effort -- never break the page over a local DB write
+    # PIIP audit 2026-08 (accounting pass): gated on Fresh underlying data -- without this, leaving
+    # the page open overnight/over a weekend would log the SAME stale closing price every 30s for
+    # hours, since data_quality_snapshot() already correctly flags it Stale but nothing previously
+    # stopped the log write itself. Those repeated identical rows would silently corrupt
+    # compute_forward_outcomes()/regime_stats() later with fake "0% return over closed-market
+    # minutes" data points once real historical depth builds up -- worth fixing now, before it
+    # contaminates weeks of collection, not after.
+    if data_quality["underlying"] == "Fresh":
+        try:
+            zdlog.log_signal_snapshot(ticker, bias, confidence, entry, momentum, reversal, alignment,
+                                      trend_state, spot_price=snap["last"], day_regime=regime["state"])
+        except Exception:
+            pass  # calibration logging is best-effort -- never break the page over a local DB write
 
     # Regime transition timeline (PIIP audit 2026-08, Batch 3 / Phase 9): edge-triggered, only
     # logs when the Day Regime state actually CHANGES since the last read -- same was_alert/
