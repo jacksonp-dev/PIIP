@@ -152,7 +152,16 @@ def _lean(value: float | None, scale: float, max_pts: float) -> float:
 
 def momentum_engine(intraday_df: pd.DataFrame) -> dict | None:
     """Velocity (recent rate of change), acceleration (change in velocity), and a continuation
-    heuristic — from the same intraday bars already fetched, no new network call."""
+    heuristic — from the same intraday bars already fetched, no new network call.
+
+    `continuation_score_pct` (renamed from `continuation_probability_pct`, PIIP audit 2026-08):
+    this is a hand-tuned weighted formula (base 50, +/- coefficients on velocity/direction-
+    agreement), NOT a value calibrated against historical outcomes. It was named/described
+    elsewhere in the app as a "probability," which claims a statistical property this number
+    doesn't have -- it's a heuristic SCORE, same category as every other 0-100 number in this
+    module, not a calibrated likelihood. Also computed from the last 5 vs. prior 5 bars of
+    whatever interval was fetched (1m bars as of this module's fetch_intraday_batch default),
+    so it's specifically a short (~5-minute) lookback, not a session-level read."""
     if intraday_df is None or len(intraday_df) < 10:
         return None
     c = intraday_df["Close"]
@@ -161,11 +170,11 @@ def momentum_engine(intraday_df: pd.DataFrame) -> dict | None:
     prior_velocity_pct = float((prior.iloc[-1] / prior.iloc[0] - 1) * 100) if prior.iloc[0] else 0.0
     acceleration_pct = round(velocity_pct - prior_velocity_pct, 3)
     same_direction = (velocity_pct > 0 and acceleration_pct >= 0) or (velocity_pct < 0 and acceleration_pct <= 0)
-    continuation_prob = min(90, max(10, 50 + abs(velocity_pct) * 20 + (15 if same_direction else -15)))
+    continuation_score = min(90, max(10, 50 + abs(velocity_pct) * 20 + (15 if same_direction else -15)))
     return {"velocity_pct": round(velocity_pct, 3), "acceleration_pct": acceleration_pct,
             "velocity_label": "Increasing" if velocity_pct > 0.02 else "Decreasing" if velocity_pct < -0.02 else "Flat",
             "acceleration_label": "Positive" if acceleration_pct > 0 else "Negative" if acceleration_pct < 0 else "Flat",
-            "continuation_probability_pct": round(continuation_prob, 0)}
+            "continuation_score_pct": round(continuation_score, 0)}
 
 
 def ticker_health(snap: dict) -> dict:
@@ -390,7 +399,12 @@ def mega_cap_health(mega_snaps: dict) -> dict:
 
 def reversal_engine(momentum: dict | None, tech: dict, snap: dict) -> dict:
     """Does NOT predict tops — estimates whether the current move is strengthening or weakening
-    from momentum deceleration, VWAP overextension, RSI exhaustion, and day-range extremes."""
+    from momentum deceleration, VWAP overextension, RSI exhaustion, and day-range extremes.
+
+    `reversal_pressure_score` (renamed from `reversal_risk_pct`, PIIP audit 2026-08): a hand-
+    weighted sum (25/25/30/20-point contributions), not a value calibrated against how often a
+    reversal actually followed historically. "risk_pct" implied a calibrated statistical
+    percentage this number never was -- it's a heuristic pressure gauge, not a probability."""
     reasons = {}
     if momentum and momentum["velocity_pct"] != 0:
         decel = (momentum["velocity_pct"] > 0 and momentum["acceleration_pct"] < 0) or \
@@ -405,11 +419,11 @@ def reversal_engine(momentum: dict | None, tech: dict, snap: dict) -> dict:
     rp = snap.get("range_pos")
     reasons["Day-range extreme"] = round(min(20.0, max(0.0, (abs((rp or 50) - 50) - 30) / 20 * 20)), 1)
 
-    reversal_risk = round(min(95.0, max(5.0, sum(reasons.values()))), 0)
-    strength = round(max(5.0, 100.0 - reversal_risk), 0)
-    exhaustion_label = "High" if reversal_risk > 65 else "Moderate" if reversal_risk > 35 else "Low"
-    confidence = round(min(90.0, 50 + abs(reversal_risk - 50) / 50 * 35), 0)
-    return {"strength": strength, "reversal_risk_pct": reversal_risk,
+    reversal_pressure = round(min(95.0, max(5.0, sum(reasons.values()))), 0)
+    strength = round(max(5.0, 100.0 - reversal_pressure), 0)
+    exhaustion_label = "High" if reversal_pressure > 65 else "Moderate" if reversal_pressure > 35 else "Low"
+    confidence = round(min(90.0, 50 + abs(reversal_pressure - 50) / 50 * 35), 0)
+    return {"strength": strength, "reversal_pressure_score": reversal_pressure,
             "exhaustion_label": exhaustion_label, "confidence_pct": confidence, "reasons": reasons}
 
 
@@ -432,7 +446,7 @@ def confluence_score(bias: dict, breadth: dict, sector: dict, mega: dict,
         ("Mega Cap Health agrees", mega_confirm > 50),
         ("Momentum agrees", bool(momentum) and momentum["velocity_pct"] * lean > 0),
         ("Price is on the bias side of VWAP", (snap.get("pct_from_vwap") or 0) * lean > 0),
-        ("Reversal Risk is low", reversal["reversal_risk_pct"] < 40),
+        ("Reversal Pressure is low", reversal["reversal_pressure_score"] < 40),
         ("Relative Volume confirms conviction", (snap.get("rel_volume") or 0) > 1.0),
     ]
     agree = sum(1 for _, ok in checks if ok)
@@ -451,7 +465,7 @@ def entry_quality(bias: dict, health: dict | None, momentum: dict | None,
     — momentum, dealer positioning, this specific ticker's own health, and entry liquidity — on
     top of what bias already found, not a re-hash of bias itself."""
     pts = {}
-    pts["Momentum"] = round((((momentum["continuation_probability_pct"] if momentum else 50) - 50)
+    pts["Momentum"] = round((((momentum["continuation_score_pct"] if momentum else 50) - 50)
                              / 50 * 30), 1)
     pts["Liquidity"] = round((((options_health["execution_quality"] if options_health else 50) - 50)
                               / 50 * 30), 1)

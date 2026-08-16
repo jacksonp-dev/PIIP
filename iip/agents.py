@@ -222,7 +222,8 @@ def zero_dte_scoped_signals(signals: dict, name: str) -> dict:
         return {**common, "market_dna": signals.get("market_dna")}
     if name == "Technical & Market Structure Agent":
         return {**common, "market_bias": signals.get("market_bias"), "breadth": signals.get("breadth"),
-               "momentum": signals.get("momentum"), "reversal_risk_pct": signals.get("reversal_risk_pct")}
+               "momentum": signals.get("momentum"),
+               "reversal_pressure_score": signals.get("reversal_pressure_score")}
     if name == "Options & Positioning Agent":
         return {**common, "options_health": signals.get("options_health"),
                "dealer_positioning": signals.get("dealer_positioning"),

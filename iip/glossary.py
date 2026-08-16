@@ -25,8 +25,8 @@ GLOSSARY: dict[str, str] = {
     "ATM implied volatility": "How jumpy options expect the stock to be, from the at-the-money option. Higher = pricier options.",
     "Trend": "Whether the stock is above or below its recent average prices (up-trend vs down-trend).",
     "Momentum": "Feed: whether recent price action is pushing up or down, and whether it's overbought (stretched) "
-               "or oversold. On the 0DTE page: the estimated probability the CURRENT intraday move keeps going, "
-               "from its velocity and acceleration.",
+               "or oversold. On the 0DTE page: a heuristic score (not a calibrated probability) for whether the "
+               "CURRENT intraday move keeps going, from its velocity and acceleration.",
     "Model lean": "The tool's mechanical guess at direction. Honestly ~a coin flip and only one input — NOT a prediction.",
     "Alignment": "How strongly the mechanical signals agree with each other. This is NOT the probability of profit.",
     "Volatility": "How pricey/jumpy the options are (IV vs the stock's normal moves). A COST signal, not a direction call.",
@@ -124,8 +124,9 @@ GLOSSARY: dict[str, str] = {
     "QQQ Health": "A 0-100 composite of trend, momentum, buying pressure, structure, and relative volume for QQQ.",
     "IWM Health": "A 0-100 composite of trend, momentum, buying pressure, structure, and relative volume for IWM.",
     "DIA Health": "A 0-100 composite of trend, momentum, buying pressure, structure, and relative volume for DIA.",
-    "Reversal Risk": "Estimates whether the CURRENT move looks like it's strengthening or running out of steam "
-                     "(price/RSI divergence, VWAP overextension) — does NOT predict tops or call exact turns.",
+    "Reversal Pressure": "A heuristic score (not a calibrated probability) for whether the CURRENT move looks "
+                        "like it's strengthening or running out of steam (price/RSI divergence, VWAP "
+                        "overextension) — does NOT predict tops or call exact turns.",
     "Options Health": "Liquidity/execution quality of the options chain right now — tight spreads and real open "
                       "interest/volume mean you can actually get in and out at a fair price.",
     "Dealer Positioning": "An ESTIMATE of options dealers' net gamma exposure (GEX) from open interest. Positive/"
@@ -366,12 +367,15 @@ GLOSSARY_GROUPS: list = [
                                 "not a guaranteed one."),
         ("{Ticker} Health", "A 0-100 composite of trend, momentum, buying pressure, structure, and relative volume "
                             "for the selected index (SPY/QQQ/IWM/DIA)."),
-        ("Momentum (continuation)", "On this page, the estimated probability the CURRENT move keeps going, from "
-                                    "the intraday velocity (recent rate of change) and acceleration (is velocity "
-                                    "itself speeding up or slowing down)."),
-        ("Reversal Risk", "Estimates whether the current move looks like it's strengthening or running out of "
-                          "steam, from price/RSI divergence and how far price has stretched from VWAP. Does NOT "
-                          "predict exact tops or bottoms."),
+        ("Momentum (continuation)", "On this page, a heuristic 0-100 SCORE (not a calibrated probability) for "
+                                    "whether the CURRENT move keeps going, from the intraday velocity (recent "
+                                    "rate of change) and acceleration (is velocity itself speeding up or "
+                                    "slowing down). It's a hand-weighted formula, not validated against "
+                                    "historical outcomes — treat it the same as every other 0-100 score here."),
+        ("Reversal Pressure", "A heuristic 0-100 SCORE (not a calibrated probability) for whether the current "
+                              "move looks like it's strengthening or running out of steam, from price/RSI "
+                              "divergence and how far price has stretched from VWAP. Does NOT predict exact "
+                              "tops or bottoms, and hasn't been validated against historical outcomes."),
         ("Options Health", "Liquidity/execution quality of the options chain right now — tight bid/ask spreads and "
                            "real open interest/volume mean you can actually get filled at a fair price, not just a "
                            "quoted one."),

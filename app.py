@@ -2665,19 +2665,22 @@ def _render_zero_dte(ticker: str):
              "context": f"{health['trend_label']} · {health['momentum_label']} · {health['volume_label']}",
              "evidence": [f"{pts:+.1f}  {label}" for label, pts in health["reasons"].items()]},
             {"label": "Momentum",
-             "value": f"{momentum['continuation_probability_pct']:.0f}%" if momentum else "—",
-             "color": _score_color(momentum["continuation_probability_pct"]) if momentum else "#8b9a9d",
+             "value": f"{momentum['continuation_score_pct']:.0f}" if momentum else "—",
+             "color": _score_color(momentum["continuation_score_pct"]) if momentum else "#8b9a9d",
              "context": f"{momentum['velocity_label']} · {momentum['acceleration_label']}" if momentum
                         else "Not enough intraday bars yet.",
              "evidence": ([f"Velocity: {momentum['velocity_pct']:+.3f}% (last 5 bars)",
-                          f"Acceleration: {momentum['acceleration_pct']:+.3f}% (velocity vs. the 5 bars before that)"]
+                          f"Acceleration: {momentum['acceleration_pct']:+.3f}% (velocity vs. the 5 bars before that)",
+                          "This is a heuristic score, not a calibrated probability — it has not "
+                          "been validated against historical outcomes."]
                          if momentum else ["Needs at least 10 intraday bars — check back once the market's "
                                            "been open a little longer."])},
-            {"label": "Reversal Risk", "value": f"{reversal['reversal_risk_pct']:.0f}%",
-             "color": _score_color(100 - reversal["reversal_risk_pct"]),
+            {"label": "Reversal Pressure", "value": f"{reversal['reversal_pressure_score']:.0f}",
+             "color": _score_color(100 - reversal["reversal_pressure_score"]),
              "context": f"Strength {reversal['strength']:.0f} · {reversal['exhaustion_label']} exhaustion",
              "evidence": ["Does NOT predict tops — estimates whether the current move is "
-                         "strengthening or weakening."]},
+                         "strengthening or weakening.",
+                         "A heuristic score, not a calibrated probability of reversal."]},
         ]},
         {"label": "⚙️ Options & Dealer", "rows": [
             {"label": "Options Health",
@@ -2705,11 +2708,11 @@ def _render_zero_dte(ticker: str):
     _render_list_view(groups)
 
     st.caption("Diverging view — every metric on one shared axis, sorted so the biggest leans surface first.")
-    momentum_val = momentum["continuation_probability_pct"] if momentum else 50.0
+    momentum_val = momentum["continuation_score_pct"] if momentum else 50.0
     opt_val = opt["execution_quality"] if opt else 50.0
     breadth_val = (breadth["score_signed"] + 100) / 2
     diverging_raw = [
-        ("Reversal Risk", reversal["strength"]),
+        ("Reversal Pressure", reversal["strength"]),
         ("Entry Quality", entry["score"]),
         ("Market Bias", bias["calls_pct"]),
         ("Momentum", momentum_val),
@@ -2905,9 +2908,9 @@ def _render_zero_dte(ticker: str):
                             "breadth": {"score_signed": breadth["score_signed"], "label": breadth["label"]},
                             "sector_health_pct": sector["overall_confirmation_pct"],
                             "mega_cap_health": mega["score"],
-                            "momentum": ({"continuation_probability_pct":
-                                         momentum["continuation_probability_pct"]} if momentum else None),
-                            "reversal_risk_pct": reversal["reversal_risk_pct"],
+                            "momentum": ({"continuation_score_pct":
+                                         momentum["continuation_score_pct"]} if momentum else None),
+                            "reversal_pressure_score": reversal["reversal_pressure_score"],
                             "entry_quality": entry["score"],
                             "confluence": f"{confluence['agree']}/{confluence['total']}",
                             "options_health": opt["execution_quality"] if opt else None,
