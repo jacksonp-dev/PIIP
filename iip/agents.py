@@ -234,7 +234,8 @@ def zero_dte_scoped_signals(signals: dict, name: str) -> dict:
         return {**common, "10y_yield": macro_sig.get("10y_yield"), "dxy": macro_sig.get("dxy"),
                "wti": macro_sig.get("wti"), "rsp_vs_spy": macro_sig.get("rsp_vs_spy"),
                "sector_health_pct": signals.get("sector_health_pct"),
-               "mega_cap_health": signals.get("mega_cap_health")}
+               "mega_cap_health": signals.get("mega_cap_health"),
+               "nvda_relative_strength": signals.get("nvda_relative_strength")}
     # Skeptic / Risk Agent: everything except the conclusion-shaped fields
     return {k: v for k, v in signals.items() if k not in _ZERO_DTE_ANSWER_FIELDS}
 

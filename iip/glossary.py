@@ -141,6 +141,10 @@ GLOSSARY: dict[str, str] = {
     "Trend State": "'Uptrend' / 'Downtrend' / 'Range / Chop,' derived from Timeframe Alignment with hysteresis — "
                   "a new state needs 2 consecutive 30-second refreshes agreeing before it's displayed, so it "
                   "doesn't flip on single-bar noise.",
+    "NVDA Relative Strength": "Is NVDA (the market's dominant AI/semis bellwether, and the single largest weight "
+                             "in the Mega Cap basket) outperforming or underperforming the selected index right "
+                             "now. A single-stock read, shown as context alongside Mega Cap Health — not its own "
+                             "trade signal, and NVDA isn't actually a component of IWM (small-caps).",
     "Options Health": "Liquidity/execution quality of the options chain right now — tight spreads and real open "
                       "interest/volume mean you can actually get in and out at a fair price.",
     "Dealer Positioning": "An ESTIMATE of options dealers' net gamma exposure (GEX) from open interest. Positive/"
@@ -368,6 +372,11 @@ GLOSSARY_GROUPS: list = [
         ("Mega Cap Health", "A weighted composite of the 10 largest index-moving stocks (AAPL, MSFT, NVDA…), using "
                             "approximate index weights — shows whether the names that actually move the index are "
                             "participating in today's move."),
+        ("NVDA Relative Strength", "Whether NVDA — the largest weight in the Mega Cap basket and the market's "
+                                   "dominant AI/semis bellwether — is outperforming or underperforming the "
+                                   "selected index today, plus NVDA's own short-term momentum. A single-stock "
+                                   "read shown as context, not a trade signal on its own; NVDA isn't part of "
+                                   "IWM (small-caps), so there it's cross-asset context only."),
         ("VWAP", "Volume-Weighted Average Price — the session's running 'fair value,' weighted by how much volume "
                 "traded at each price. Above VWAP favors buyers; below favors sellers. Institutional desks watch "
                 "this level closely."),

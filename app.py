@@ -44,6 +44,7 @@ from iip import social
 from iip import timeframe as tf
 from iip import watchlist as wl
 from iip import zero_dte as zd
+from iip import zero_dte_log as zdlog
 
 DB = "iip.db"   # single on-disk database — predictions AND the paper account persist here
 
@@ -2502,6 +2503,16 @@ def _render_zero_dte(ticker: str):
     prev_day = zd.previous_day_levels(daily.get(ticker))
     or15 = zd.opening_range(intraday.get(ticker), minutes=15)
 
+    # NVDA Relative Strength (PIIP audit 2026-08, Option C): reuses the mega-cap snapshot/intraday
+    # bars already batched above -- NVDA is already fetched as part of MEGA_CAPS -- no new call.
+    nvda_rs = zd.nvda_relative_strength(ticker, snap, mega_snaps.get("NVDA"), intraday.get("NVDA"))
+
+    try:
+        zdlog.log_signal_snapshot(ticker, bias, confidence, entry, momentum, reversal, alignment,
+                                  trend_state)
+    except Exception:
+        pass  # calibration logging is best-effort -- never break the page over a local DB write
+
     dna = mdna.classify(snap, intraday.get(ticker), daily.get(ticker))
     try:
         mdna.log_snapshot(ticker, dna)
@@ -2577,6 +2588,22 @@ def _render_zero_dte(ticker: str):
                       "not per-ticker.")
             _render_catalyst_terminal()
 
+            # Signal Calibration Log status (PIIP audit 2026-08, Option C): every refresh's
+            # scores are now being logged locally (zdlog.log_signal_snapshot() above) -- this is
+            # collection status ONLY, not a backtest or win-rate claim. Same explicit deferral
+            # already used for Reddit Momentum's own log_snapshot(): a real validation/calibration
+            # view is honest once weeks/months of logged sessions exist, not before.
+            st.markdown("**📊 Signal Calibration Log**")
+            log_status = zdlog.collection_status(ticker)
+            if log_status["rows"]:
+                st.caption(f"Collecting since {log_status['first_date']} — {log_status['rows']:,} "
+                          f"{ticker} snapshots logged across {log_status['days']} day(s). This is "
+                          "collection only, NOT a backtest — there isn't enough history yet to "
+                          "validate any of this page's scores against real outcomes.")
+            else:
+                st.caption("No snapshots logged yet for this ticker — starts collecting on the "
+                          "next refresh.")
+
     st.caption("Tap any row to see the evidence behind its number.")
 
     # Exit Quality needs real Python interactivity (checkbox + radio), which a static embedded
@@ -2593,6 +2620,41 @@ def _render_zero_dte(ticker: str):
                 eq = zd.exit_quality(direction, bias, momentum, breadth, snap)
                 for note in eq["notes"]:
                     st.write(f"• {note}")
+
+                # Contract-specific quote (PIIP audit 2026-08, Option C): everything ABOVE this
+                # (Options Health, Dealer Positioning) is auto-picked ATM -- often not the strike
+                # someone actually holds. Snap the strike list to whichever side (calls/puts) the
+                # chosen Direction implies, default the picker to the ATM strike so it's a one-
+                # click confirm for the common case, but let it be overridden.
+                strikes = zd.available_strikes(chain, direction) if chain else []
+                if strikes:
+                    default_strike = (opt["atm_strike"] if opt and opt["atm_strike"] in strikes
+                                      else min(strikes, key=lambda s: abs(s - snap["last"])))
+                    picked_strike = st.selectbox(
+                        "Your contract's strike", strikes,
+                        index=strikes.index(default_strike),
+                        key=f"zd_strike_{ticker}_{direction}")
+                    cq = zd.contract_quote(chain, snap["last"], picked_strike, direction)
+                    if cq:
+                        cq_color = "#79ed8e" if cq["execution_quality"] > 60 else \
+                                   "#fabf6b" if cq["execution_quality"] > 40 else "#ff8080"
+                        delta_bit = f" · Δ {cq['delta']:.2f}" if cq["delta"] is not None else ""
+                        theta_bit = f" · θ/day {cq['theta_per_day']:.3f}" if cq["theta_per_day"] is not None else ""
+                        spread_bit = cq["spread_pct"] if cq["spread_pct"] is not None else "—"
+                        st.markdown(
+                            f'<div style="padding:0.5rem 0.7rem;background:#15191a;border:1px solid '
+                            f'#232b2d;border-radius:6px;margin-top:0.4rem">'
+                            f'<b>{ticker} {cq["matched_strike"]:.0f}{direction[0]}</b> · '
+                            f'Bid ${cq["bid"]:.2f} / Ask ${cq["ask"]:.2f} · '
+                            f'<span style="color:{cq_color}">{cq["spread_label"]} spread '
+                            f'({spread_bit}%)</span> · '
+                            f'OI {cq["oi"]:,.0f} · Vol {cq["volume"]:,.0f}{delta_bit}{theta_bit}'
+                            f'</div>', unsafe_allow_html=True)
+                        if cq["strike_snapped"]:
+                            st.caption(f"No exact {picked_strike:.0f} strike listed — showing the "
+                                      f"nearest one, {cq['matched_strike']:.0f}.")
+                else:
+                    st.caption("No listed options chain available for a contract-specific quote right now.")
 
                 # Edge-triggered alert: bias flipping against your direction is the "major change"
                 # signal -- toast + beep fire once on the refresh it first flips, the red banner
@@ -2639,6 +2701,19 @@ def _render_zero_dte(ticker: str):
             {"label": "Mega Cap Health", "value": f"{mega['score']:.0f}/100", "color": _score_color(mega["score"]),
              "context": f"{mega['weighted_avg_change_pct']:+.2f}% wtd avg (approx. SPY weights)",
              "evidence": [f"{tk}: {d['day_change_pct']:+.2f}% (weight {d['weight']:.1f})" for tk, d in top_movers]},
+            {"label": "NVDA Relative Strength",
+             "value": nvda_rs["label"] if nvda_rs else "—",
+             "color": ("#79ed8e" if nvda_rs and nvda_rs["label"] == "Outperforming" else
+                      "#ff8080" if nvda_rs and nvda_rs["label"] == "Underperforming" else
+                      "#87d1ff" if nvda_rs else "#8b9a9d"),
+             "context": (f"NVDA {nvda_rs['nvda_day_change_pct']:+.2f}% vs {ticker} "
+                        f"{nvda_rs['index_day_change_pct']:+.2f}% (spread {nvda_rs['spread_pct']:+.2f}pt)"
+                        if nvda_rs else "NVDA data unavailable right now."),
+             "evidence": ([nvda_rs["note"],
+                          f"NVDA's own intraday momentum: {nvda_rs['nvda_momentum_label'] or '—'}",
+                          "A single-stock read, not a market-wide signal — context alongside "
+                          "Mega Cap Health, not its own trade signal."] if nvda_rs
+                         else ["Needs a live NVDA snapshot — check back during market hours."])},
         ]},
         {"label": f"\U0001f4d0 Levels — {ticker}", "rows": [
             {"label": "VWAP", "value": f"${snap['vwap']:.2f}",
@@ -2953,6 +3028,9 @@ def _render_zero_dte(ticker: str):
                             "breadth": {"score_signed": breadth["score_signed"], "label": breadth["label"]},
                             "sector_health_pct": sector["overall_confirmation_pct"],
                             "mega_cap_health": mega["score"],
+                            "nvda_relative_strength": ({"label": nvda_rs["label"],
+                                                        "spread_pct": nvda_rs["spread_pct"]}
+                                                       if nvda_rs else None),
                             "momentum": ({"continuation_score_pct":
                                          momentum["continuation_score_pct"]} if momentum else None),
                             "reversal_pressure_score": reversal["reversal_pressure_score"],

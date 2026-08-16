@@ -282,6 +282,95 @@ def options_health(chain: dict, spot: float) -> dict | None:
             "execution_quality": execution_quality}
 
 
+# NVDA is a component of SPY, QQQ, and DIA (joined the Dow Nov 2024) but NOT IWM (Russell 2000 is
+# small-caps only) -- the relative-strength read below is still shown for IWM since it's useful
+# cross-asset context, but the note makes clear NVDA isn't part of that index's own math.
+_NVDA_INDEX_MEMBER = {"SPY": True, "QQQ": True, "DIA": True, "IWM": False}
+
+
+def nvda_relative_strength(ticker: str, index_snap: dict, nvda_snap: dict | None,
+                           nvda_intraday: pd.DataFrame | None) -> dict | None:
+    """PIIP audit 2026-08, Option C. Is NVDA — the single largest weight in MEGA_CAP_WEIGHTS and
+    the market's dominant AI/semis bellwether — leading, lagging, or in-line with the selected
+    index today? Built entirely from data already in the batched fetch (NVDA is already one of
+    MEGA_CAPS), no new network call. A single-stock read, not a market-wide signal -- shown as
+    context alongside Mega Cap Health, never as its own trade signal."""
+    if nvda_snap is None:
+        return None
+    spread_pct = round(nvda_snap["day_change_pct"] - index_snap["day_change_pct"], 2)
+    score = round(max(0, min(100, 50 + _lean(spread_pct, scale=1.5, max_pts=50))), 0)
+    label = "Outperforming" if spread_pct > 0.15 else "Underperforming" if spread_pct < -0.15 else "In-line"
+    nvda_momentum = momentum_engine(nvda_intraday) if nvda_intraday is not None else None
+    is_member = _NVDA_INDEX_MEMBER.get(ticker, False)
+    return {"score": score, "label": label, "spread_pct": spread_pct,
+            "nvda_day_change_pct": round(nvda_snap["day_change_pct"], 2),
+            "index_day_change_pct": round(index_snap["day_change_pct"], 2),
+            "nvda_momentum_label": nvda_momentum["velocity_label"] if nvda_momentum else None,
+            "is_index_member": is_member,
+            "note": (f"NVDA is a component of {ticker} — this partly reflects {ticker} moving "
+                    f"itself, not an independent confirmation." if is_member else
+                    f"NVDA is NOT a component of {ticker} ({ticker} is small/mid-cap-weighted) — "
+                    "this is cross-asset risk-sentiment context only, not index math.")}
+
+
+def available_strikes(chain: dict, direction: str) -> list[float]:
+    """Sorted listed strikes for the given side of the already-fetched chain — feeds the
+    contract-picker UI, no new network call."""
+    if chain is None:
+        return []
+    df = chain["calls"] if direction == "CALL" else chain["puts"]
+    return sorted(float(s) for s in df["strike"].dropna().unique())
+
+
+def contract_quote(chain: dict, spot: float, strike: float, direction: str) -> dict | None:
+    """Liquidity/greeks read for ONE SPECIFIC contract the user picks — not the auto-selected ATM
+    strike options_health() always shows. PIIP audit 2026-08, Option C: options_health() only
+    ever answered 'is the ATM strike tradeable', but the user's actual position (or the one
+    they're considering) is often a different strike. Same formulas as options_health() (spread%,
+    liquidity/execution composite, det.bs_greeks), just re-run for the requested contract instead
+    of the nearest-to-spot one. Snaps to the nearest LISTED strike if the exact one isn't quoted."""
+    if chain is None:
+        return None
+    df = chain["calls"] if direction == "CALL" else chain["puts"]
+    if df.empty:
+        return None
+    df = df.copy()
+    df["_dist"] = (df["strike"] - strike).abs()
+    row = df.loc[df["_dist"].idxmin()]
+    matched_strike = float(row["strike"])
+    bid, ask = float(row.get("bid") or 0), float(row.get("ask") or 0)
+    mid = (bid + ask) / 2 if bid and ask else None
+    spread_pct = ((ask - bid) / mid * 100) if mid else None
+    oi = float(row.get("openInterest") or 0)
+    vol = float(row.get("volume") or 0)
+    iv = row.get("impliedVolatility")
+
+    spread_score = 100 - _lean(spread_pct, scale=10, max_pts=100) if spread_pct is not None else 50
+    spread_score = max(0, min(100, spread_score))
+    liquidity_score = round(min(100, (min(oi, 5000) / 5000 * 50) + (min(vol, 2000) / 2000 * 50)), 0)
+    execution_quality = round((spread_score + liquidity_score) / 2, 0)
+
+    greeks = {}
+    try:
+        T, _ = det._dte_years(chain["expiry"])
+        if T <= 0:
+            T = 1 / 365
+        if iv and iv == iv and iv > 0:
+            greeks = det.bs_greeks(spot, matched_strike, T, 0.045, float(iv), call=(direction == "CALL"))
+    except Exception:
+        pass
+
+    return {"requested_strike": strike, "matched_strike": matched_strike,
+            "strike_snapped": matched_strike != strike, "direction": direction,
+            "bid": bid, "ask": ask, "mid": mid,
+            "spread_pct": round(spread_pct, 2) if spread_pct is not None else None,
+            "spread_label": "Excellent" if (spread_pct or 99) < 3 else "Fair" if (spread_pct or 99) < 8 else "Wide",
+            "oi": oi, "volume": vol, "iv_pct": round(float(iv) * 100, 1) if iv and iv == iv else None,
+            "delta": greeks.get("delta"), "gamma": greeks.get("gamma"),
+            "theta_per_day": greeks.get("theta_per_day"),
+            "liquidity_score": liquidity_score, "execution_quality": execution_quality}
+
+
 def dealer_positioning(chain: dict, spot: float) -> dict | None:
     """ESTIMATED dealer gamma exposure (GEX) from open interest — the standard retail-approximation
     formula (dealers assumed net long gamma from calls, net short from puts). NOT verified against
