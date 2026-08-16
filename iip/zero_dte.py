@@ -351,8 +351,9 @@ def contract_quote(chain: dict, spot: float, strike: float, direction: str) -> d
     execution_quality = round((spread_score + liquidity_score) / 2, 0)
 
     greeks = {}
+    dte_days = None
     try:
-        T, _ = det._dte_years(chain["expiry"])
+        T, dte_days = det._dte_years(chain["expiry"])
         if T <= 0:
             T = 1 / 365
         if iv and iv == iv and iv > 0:
@@ -360,8 +361,32 @@ def contract_quote(chain: dict, spot: float, strike: float, direction: str) -> d
     except Exception:
         pass
 
+    # Moneyness (PIIP audit 2026-08, Batch 1 / Phase 18): signed distance from spot to strike, as
+    # a % of strike, with an ITM/OTM label per the contract's own direction.
+    dist_pct = round(abs(spot - matched_strike) / matched_strike * 100, 2) if matched_strike else None
+    is_itm = (spot > matched_strike) if direction == "CALL" else (spot < matched_strike)
+    moneyness_label = f"{dist_pct}% {'ITM' if is_itm else 'OTM'}" if dist_pct is not None else None
+
+    # Last-trade age (PIIP audit 2026-08, Batch 1 / Phase 18): yfinance's `lastTradeDate` is when
+    # this SPECIFIC contract last actually traded -- NOT a live bid/ask timestamp (yfinance quotes
+    # aren't individually timestamped). Labeled "last traded", never "quote age", so it isn't
+    # mistaken for bid/ask freshness -- a contract that hasn't traded in hours despite a live spot
+    # price is itself a real liquidity signal, distinct from spread%.
+    last_trade_minutes = None
+    ltd = row.get("lastTradeDate")
+    if ltd is not None and ltd == ltd:
+        try:
+            ltd_ts = pd.Timestamp(ltd)
+            now_ts = pd.Timestamp.now(tz=ltd_ts.tz) if ltd_ts.tzinfo else pd.Timestamp.now()
+            last_trade_minutes = round((now_ts - ltd_ts).total_seconds() / 60, 1)
+        except Exception:
+            pass
+
     return {"requested_strike": strike, "matched_strike": matched_strike,
             "strike_snapped": matched_strike != strike, "direction": direction,
+            "expiry": chain.get("expiry"), "dte_days": dte_days,
+            "moneyness_pct": dist_pct, "moneyness_label": moneyness_label,
+            "last_trade_minutes": last_trade_minutes,
             "bid": bid, "ask": ask, "mid": mid,
             "spread_pct": round(spread_pct, 2) if spread_pct is not None else None,
             "spread_label": "Excellent" if (spread_pct or 99) < 3 else "Fair" if (spread_pct or 99) < 8 else "Wide",
@@ -514,6 +539,110 @@ def reversal_engine(momentum: dict | None, tech: dict, snap: dict) -> dict:
     confidence = round(min(90.0, 50 + abs(reversal_pressure - 50) / 50 * 35), 0)
     return {"strength": strength, "reversal_pressure_score": reversal_pressure,
             "exhaustion_label": exhaustion_label, "confidence_pct": confidence, "reasons": reasons}
+
+
+def vwap_crossings(intraday_df: pd.DataFrame | None) -> dict | None:
+    """PIIP audit 2026-08, Batch 1 (Phase 4): how many times has price crossed the RUNNING
+    (as-of-that-bar) VWAP today, and how long ago was the most recent one. A clean trend day
+    should cross rarely; a chop day crosses back and forth. Deliberately does NOT interpret a
+    given count as bullish/bearish/choppy here -- that relationship is a hypothesis to validate
+    against zero_dte_log's collected history (see iip/zero_dte_log.py), not something to assume
+    up front. Feeds trend_integrity() below as one input among several."""
+    if intraday_df is None or len(intraday_df) < 5:
+        return None
+    running = det.running_vwap(intraday_df)
+    side = np.sign(intraday_df["Close"] - running).replace(0, np.nan).ffill().dropna()
+    if side.empty:
+        return None
+    crossed = side.diff().fillna(0) != 0
+    count = int(crossed.sum())
+    crossing_times = side.index[crossed]
+    last_cross = crossing_times[-1] if len(crossing_times) else None
+    now_ts = intraday_df.index[-1]
+    minutes_since_last = round((now_ts - last_cross).total_seconds() / 60, 0) if last_cross is not None else None
+    return {"count": count, "minutes_since_last": minutes_since_last,
+            "current_side": "Above VWAP" if side.iloc[-1] > 0 else "Below VWAP"}
+
+
+def trend_efficiency(intraday_df: pd.DataFrame | None) -> dict | None:
+    """PIIP audit 2026-08, Batch 1 (Phase 5): Kaufman-style path efficiency -- |net change| over
+    the session divided by the sum of every bar-to-bar move (the actual path length walked, not
+    just where price ended up). A different, more whipsaw-sensitive metric than market_dna.py's
+    net_vs_range (which uses today's HIGH-LOW range as the denominator, not the real path) --
+    distinguishes CLEAN directional movement from TWO-WAY CHOP even when both cover the same net
+    distance. 100% = every bar moved the same direction; near 0% = pure back-and-forth noise."""
+    if intraday_df is None or len(intraday_df) < 5:
+        return None
+    c = intraday_df["Close"]
+    net = abs(float(c.iloc[-1] - c.iloc[0]))
+    path = float(c.diff().abs().sum())
+    efficiency_pct = round(min(100.0, (net / path * 100) if path > 0 else 0.0), 1)
+    return {"efficiency_pct": efficiency_pct, "net_move": round(net, 4), "path_length": round(path, 4)}
+
+
+def trend_integrity(alignment: dict, crossings: dict | None, efficiency: dict | None,
+                    confluence: dict) -> dict:
+    """PIIP audit 2026-08, Batch 1 (Phase 3): 'how clean and persistent is the trend right now' --
+    a SYNTHESIS of measurements already computed elsewhere (timeframe alignment, VWAP-crossing
+    frequency, path efficiency, structural confirmation), never a new independent judgment. Same
+    itemized, no-black-box shape as every other score in this module. A market up 0.8% on 1
+    VWAP crossing and 90% path efficiency reads very differently here than one up 0.8% on 9
+    crossings and 30% efficiency, even though Market Bias might score them similarly."""
+    pts = {}
+    pts["Timeframe alignment"] = round((alignment["alignment_pct"] - 50) / 50 * 30, 1) if alignment["total"] else 0.0
+    pts["Trend efficiency"] = round((efficiency["efficiency_pct"] - 50) / 50 * 30, 1) if efficiency else 0.0
+    # Fewer crossings = higher integrity -- 5+ crossings in a session reads as fully chopped.
+    pts["VWAP discipline"] = round(max(-25.0, 25.0 - (crossings["count"] * 5)), 1) if crossings else 0.0
+    conf_ratio = (confluence["agree"] / confluence["total"]) if confluence["total"] else 0.5
+    pts["Structural confirmation"] = round((conf_ratio - 0.5) * 2 * 15, 1)
+    raw = sum(pts.values())
+    score = round(max(0.0, min(100.0, 50 + raw)), 0)
+    label = "Clean Trend" if score > 70 else "Choppy / Mixed" if score < 40 else "Developing"
+    return {"score": score, "label": label, "reasons": pts}
+
+
+def no_clear_edge_reasons(bias: dict, confluence: dict, crossings: dict | None,
+                          alignment: dict, reversal: dict) -> list[str]:
+    """PIIP audit 2026-08, Batch 1 (Phase 21): makes 'NO CLEAR EDGE' an EXPLAINED first-class
+    outcome instead of a bare label nobody can act on -- itemizes the specific reasons, pulled
+    only from measurements already computed elsewhere on the page. Empty list when there IS a
+    real edge (caller only renders this when bias['recommendation'] == 'NO CLEAR EDGE')."""
+    reasons = []
+    if abs(bias["raw_signed"]) <= 15:
+        reasons.append(f"Market Bias has no real lean ({bias['raw_signed']:+.0f}, needs beyond "
+                       "±15 to count as directional)")
+    if confluence["total"] and confluence["agree"] < confluence["total"] / 2:
+        reasons.append(f"Only {confluence['agree']}/{confluence['total']} signals agree with "
+                       "each other")
+    if alignment["total"] and alignment["alignment_pct"] < 60:
+        reasons.append(f"Timeframes disagree ({alignment['agree']}/{alignment['total']} aligned)")
+    if crossings and crossings["count"] > 4:
+        reasons.append(f"{crossings['count']} VWAP crossings today — choppy, not clean directional")
+    if reversal["reversal_pressure_score"] > 60:
+        reasons.append(f"Reversal pressure is elevated ({reversal['reversal_pressure_score']:.0f}/100)")
+    return reasons
+
+
+def data_quality_snapshot(intraday_df: pd.DataFrame | None, chain: dict | None,
+                          tf_snapshot: dict) -> dict:
+    """PIIP audit 2026-08, Batch 1 (Phase 22): consolidates the freshness/proxy caveats already
+    scattered across this page's captions into one panel. Underlying freshness is computed from
+    the gap between the last intraday BAR's own timestamp and now -- a real signal (e.g. outside
+    session hours the last bar is hours old), not a cache-hit check (the 25s fetch cache already
+    guarantees data is at most 25s stale from whatever Yahoo last had, which is a different
+    question from whether the market itself has fresh bars to give)."""
+    underlying, minutes_stale = "Unknown", None
+    if intraday_df is not None and not intraday_df.empty:
+        last_bar = intraday_df.index[-1]
+        now_ts = pd.Timestamp.now(tz=last_bar.tz) if last_bar.tzinfo else pd.Timestamp.now()
+        minutes_stale = round((now_ts - last_bar).total_seconds() / 60, 1)
+        underlying = "Fresh" if minutes_stale < 15 else "Stale"
+    options_note = ("Live bid/ask quotes; Open Interest is end-of-PRIOR-day, not intraday-live"
+                    if chain is not None else "No listed chain available right now")
+    timeframe_availability = {label: bool(r.get("available", False)) for label, r in tf_snapshot.items()}
+    return {"underlying": underlying, "underlying_minutes_stale": minutes_stale,
+            "options_note": options_note, "options_available": chain is not None,
+            "timeframe_availability": timeframe_availability}
 
 
 def confluence_score(bias: dict, breadth: dict, sector: dict, mega: dict,

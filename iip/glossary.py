@@ -141,6 +141,16 @@ GLOSSARY: dict[str, str] = {
     "Trend State": "'Uptrend' / 'Downtrend' / 'Range / Chop,' derived from Timeframe Alignment with hysteresis — "
                   "a new state needs 2 consecutive 30-second refreshes agreeing before it's displayed, so it "
                   "doesn't flip on single-bar noise.",
+    "Trend Integrity": "How clean and persistent the current trend is (0-100) — a synthesis of timeframe alignment, "
+                      "trend efficiency, VWAP-crossing discipline, and structural confirmation, all already "
+                      "computed elsewhere on this page. Not a new independent judgment call.",
+    "Trend Efficiency": "Net move ÷ total path walked (Kaufman-style efficiency). 100% is a straight line; a low "
+                       "% means the price covered a lot of back-and-forth ground to end up where it did — the "
+                       "same net % move can be a clean trend or pure chop depending on this number.",
+    "VWAP Crossings": "How many times price has crossed the RUNNING (as-of-that-bar) VWAP today. A clean trend "
+                     "day tends to cross rarely; a chop day crosses back and forth. The relationship between "
+                     "crossing count and what happens next is being collected for future validation, not "
+                     "assumed — a given count isn't labeled bullish/bearish/choppy here.",
     "NVDA Relative Strength": "Is NVDA (the market's dominant AI/semis bellwether, and the single largest weight "
                              "in the Mega Cap basket) outperforming or underperforming the selected index right "
                              "now. A single-stock read, shown as context alongside Mega Cap Health — not its own "
@@ -360,6 +370,31 @@ GLOSSARY_GROUPS: list = [
         ("Exit Quality", "Unlocked once you flip 'I'm in a trade.' Watches whether the market's bias has flipped "
                          "against your chosen direction so you notice a real change of conditions — it never "
                          "auto-exits you, that call stays yours."),
+        ("Trend Integrity", "How clean and persistent the current trend is (0-100) — a synthesis of Timeframe "
+                            "Alignment, Trend Efficiency, VWAP-crossing discipline, and how many other signals "
+                            "structurally confirm it. A market up 0.8% with 1 VWAP crossing and 90% trend "
+                            "efficiency reads very differently here than one up 0.8% with 9 crossings and 30% "
+                            "efficiency, even if Market Bias scores them similarly."),
+        ("Trend Efficiency", "Net move over the session ÷ the total bar-to-bar path walked to get there (Kaufman "
+                             "efficiency ratio). 100% is a straight line; low % means a lot of back-and-forth "
+                             "ground was covered — a different, more whipsaw-sensitive read than Market DNA's "
+                             "net-vs-range metric."),
+        ("VWAP Crossings", "How many times price has crossed the RUNNING (as-of-that-bar) VWAP today, plus time "
+                          "since the last one. A clean trend day tends to cross rarely; a chop day crosses back "
+                          "and forth. The count isn't labeled bullish/bearish/choppy here — that relationship is "
+                          "being collected in the Signal Calibration Log for future validation, not assumed."),
+        ("NO CLEAR EDGE", "Shown in the hero when Market Bias has no real directional lean. Itemizes the SPECIFIC "
+                          "reasons (which checks disagree, elevated VWAP crossings, timeframe conflict, reversal "
+                          "pressure) instead of just a bare label — every reason is pulled from measurements "
+                          "already computed elsewhere on the page."),
+        ("Bid Simulator", "Type a hypothetical bid for your selected contract and see the objective difference "
+                          "from the current bid/ask/mid. Deliberately does NOT estimate a fill probability — that "
+                          "would need historical quote/fill data this project doesn't collect yet, so it's "
+                          "labeled UNKNOWN rather than guessed."),
+        ("Data Quality", "Consolidates this page's freshness/proxy caveats into one place: whether the underlying "
+                         "price data is Fresh or Stale (based on the last intraday bar's own timestamp, not just "
+                         "a cache check), options quote context, and which timeframes (5m/15m/30m/Daily) have "
+                         "enough of today's session to compute yet."),
         ("Market Bias", "A mechanical -100..+100 lean built from VWAP position, EMA20/50/200 alignment, breadth "
                         "agreement, the VIX trend, RSI, and price vs the 200-day average — shown as a CALLS/PUTS "
                         "lean with a confidence %. Still mechanical, still roughly a coin flip on direction."),

@@ -115,6 +115,18 @@ def technical_metrics(prices: pd.DataFrame) -> dict:
     }
 
 
+def running_vwap(df: pd.DataFrame) -> pd.Series:
+    """Cumulative (as-of-each-bar) VWAP -- the running fair-value line a clean trend day should
+    stay on one side of, while a chop day crosses back and forth repeatedly. Extracted as a shared
+    primitive (PIIP audit 2026-08, Batch 1): market_dna.py's day-shape classifier and
+    zero_dte.py's VWAP-crossing counter both need this exact series -- one implementation instead
+    of two copies of the same cumsum math."""
+    c, v = df["Close"], df["Volume"]
+    cum_pv = (c * v).cumsum()
+    cum_v = v.cumsum().replace(0, np.nan)
+    return cum_pv / cum_v
+
+
 def intraday_snapshot(df: pd.DataFrame) -> dict | None:
     """Today's VWAP/range/day-change from intraday bars (Close, Open, High, Low, Volume). Pure
     function — extracted so it has exactly one implementation instead of being written inline

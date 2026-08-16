@@ -2507,6 +2507,16 @@ def _render_zero_dte(ticker: str):
     # bars already batched above -- NVDA is already fetched as part of MEGA_CAPS -- no new call.
     nvda_rs = zd.nvda_relative_strength(ticker, snap, mega_snaps.get("NVDA"), intraday.get("NVDA"))
 
+    # Trend Integrity (PIIP audit 2026-08, Batch 1): VWAP crossings + path efficiency are new
+    # primitives; Trend Integrity is a synthesis of those plus alignment/confluence already
+    # computed above -- no new network calls, all derived from data already in hand.
+    crossings = zd.vwap_crossings(intraday.get(ticker))
+    efficiency = zd.trend_efficiency(intraday.get(ticker))
+    integrity = zd.trend_integrity(alignment, crossings, efficiency, confluence)
+    no_edge_reasons = (zd.no_clear_edge_reasons(bias, confluence, crossings, alignment, reversal)
+                       if bias["recommendation"] == "NO CLEAR EDGE" else [])
+    data_quality = zd.data_quality_snapshot(intraday.get(ticker), chain, tf_snapshot)
+
     try:
         zdlog.log_signal_snapshot(ticker, bias, confidence, entry, momentum, reversal, alignment,
                                   trend_state)
@@ -2536,6 +2546,16 @@ def _render_zero_dte(ticker: str):
                       "statistically indistinguishable from SPY's own 57.3% base rate over the same "
                       "period. This score has not been shown to beat the market's baseline. Treat it "
                       "as an internal-agreement heuristic, not a track record.")
+            # NO CLEAR EDGE (PIIP audit 2026-08, Batch 1 / Phase 21): a first-class, EXPLAINED
+            # outcome -- only renders when Market Bias itself has no real lean, and only shows
+            # reasons already computed elsewhere on the page, never a new judgment.
+            if no_edge_reasons:
+                reasons_html = "".join(f"<li>{_esc(r)}</li>" for r in no_edge_reasons)
+                st.markdown(f'<div style="margin-top:0.6rem;padding:0.6rem 0.8rem;background:'
+                           f'#2a2415;border:1px solid #5a4c2c;border-radius:6px;">'
+                           f'<b style="color:#fabf6b">⚠️ NO CLEAR EDGE</b>'
+                           f'<ul style="margin:0.3rem 0 0 1.1rem;padding:0;font-size:0.85rem;'
+                           f'color:#e8ecec">{reasons_html}</ul></div>', unsafe_allow_html=True)
         with hc2:
             # Confluence: how many independent signals actually agree with the bias's own lean --
             # market_bias() already counts this internally to build its own confidence number, but
@@ -2604,6 +2624,21 @@ def _render_zero_dte(ticker: str):
                 st.caption("No snapshots logged yet for this ticker — starts collecting on the "
                           "next refresh.")
 
+            # Data Quality panel (PIIP audit 2026-08, Batch 1 / Phase 22): consolidates the
+            # freshness/proxy caveats already scattered across this page's captions into one
+            # place, plus which timeframes actually have enough of today's session to compute yet.
+            st.markdown("**🔍 Data Quality**")
+            dq_color = "#79ed8e" if data_quality["underlying"] == "Fresh" else "#ff8080"
+            st.write(f":{'green' if data_quality['underlying']=='Fresh' else 'red'}[●] "
+                    f"Underlying: **{data_quality['underlying']}**" +
+                    (f" (last bar {data_quality['underlying_minutes_stale']:.0f} min old)"
+                     if data_quality["underlying_minutes_stale"] is not None else ""))
+            st.write(f":{'green' if data_quality['options_available'] else 'red'}[●] "
+                    f"Options: {data_quality['options_note']}")
+            tf_bits = " · ".join(f"{lbl} {'✓' if avail else '✗'}"
+                                 for lbl, avail in data_quality["timeframe_availability"].items())
+            st.caption(f"Timeframe availability: {tf_bits}")
+
     st.caption("Tap any row to see the evidence behind its number.")
 
     # Exit Quality needs real Python interactivity (checkbox + radio), which a static embedded
@@ -2641,18 +2676,46 @@ def _render_zero_dte(ticker: str):
                         delta_bit = f" · Δ {cq['delta']:.2f}" if cq["delta"] is not None else ""
                         theta_bit = f" · θ/day {cq['theta_per_day']:.3f}" if cq["theta_per_day"] is not None else ""
                         spread_bit = cq["spread_pct"] if cq["spread_pct"] is not None else "—"
+                        dte_bit = f" · {cq['dte_days']}DTE" if cq["dte_days"] is not None else ""
+                        money_bit = f" · {cq['moneyness_label']}" if cq["moneyness_label"] else ""
+                        if cq["last_trade_minutes"] is None:
+                            trade_bit = "no trades reported"
+                        elif cq["last_trade_minutes"] < 60:
+                            trade_bit = f"last traded {cq['last_trade_minutes']:.0f} min ago"
+                        else:
+                            trade_bit = f"last traded {cq['last_trade_minutes'] / 60:.1f}h ago"
                         st.markdown(
                             f'<div style="padding:0.5rem 0.7rem;background:#15191a;border:1px solid '
                             f'#232b2d;border-radius:6px;margin-top:0.4rem">'
-                            f'<b>{ticker} {cq["matched_strike"]:.0f}{direction[0]}</b> · '
+                            f'<b>{ticker} {cq["matched_strike"]:.0f}{direction[0]}</b>{dte_bit}{money_bit} · '
                             f'Bid ${cq["bid"]:.2f} / Ask ${cq["ask"]:.2f} · '
                             f'<span style="color:{cq_color}">{cq["spread_label"]} spread '
                             f'({spread_bit}%)</span> · '
                             f'OI {cq["oi"]:,.0f} · Vol {cq["volume"]:,.0f}{delta_bit}{theta_bit}'
+                            f'<br><span style="font-size:0.78rem;color:#8b9a9d">{trade_bit}</span>'
                             f'</div>', unsafe_allow_html=True)
                         if cq["strike_snapped"]:
                             st.caption(f"No exact {picked_strike:.0f} strike listed — showing the "
                                       f"nearest one, {cq['matched_strike']:.0f}.")
+
+                        # Bid Simulator (PIIP audit 2026-08, Batch 1 / Phase 19): objective diff
+                        # math only, against the SAME quote already fetched above -- no new call,
+                        # no fill-probability claim (that needs historical fill data this project
+                        # doesn't have yet, see zero_dte_log.py's own collection-only stance).
+                        if cq["mid"]:
+                            hyp_bid = st.number_input(
+                                "Bid Simulator — hypothetical bid", min_value=0.0,
+                                value=round(cq["bid"], 2), step=0.01, format="%.2f",
+                                key=f"zd_bidsim_{ticker}_{direction}_{cq['matched_strike']}")
+                            vs_bid = hyp_bid - cq["bid"]
+                            vs_mid = hyp_bid - cq["mid"]
+                            vs_ask = hyp_bid - cq["ask"]
+                            pct_below_mid = (1 - hyp_bid / cq["mid"]) * 100 if cq["mid"] else None
+                            st.caption(
+                                f"vs current bid: {vs_bid:+.2f} · vs mid: {vs_mid:+.2f} "
+                                f"({pct_below_mid:+.1f}% below mid) · vs ask: {vs_ask:+.2f} · "
+                                f"**Fill probability: UNKNOWN** — not tracked yet, needs "
+                                "historical quote/fill data this project doesn't collect yet.")
                 else:
                     st.caption("No listed options chain available for a contract-specific quote right now.")
 
@@ -2682,6 +2745,36 @@ def _render_zero_dte(ticker: str):
             {"label": "Entry Quality", "value": f"{entry['score']:.0f}/100", "color": _score_color(entry["score"]),
              "context": entry["risk_label"],
              "evidence": [f"{pts:+.1f}  {label}" for label, pts in entry["reasons"].items()]},
+        ]},
+        {"label": "🧭 Trend Integrity", "rows": [
+            {"label": "Trend Integrity", "value": f"{integrity['score']:.0f}/100 {integrity['label']}",
+             "color": _score_color(integrity["score"]),
+             "context": "How clean and persistent the current trend is — a synthesis of the "
+                        "rows below, not a new independent read.",
+             "evidence": [f"{pts:+.1f}  {label}" for label, pts in integrity["reasons"].items()]},
+            {"label": "Trend Efficiency",
+             "value": f"{efficiency['efficiency_pct']:.0f}%" if efficiency else "—",
+             "color": _score_color(efficiency["efficiency_pct"]) if efficiency else "#8b9a9d",
+             "context": "Net move ÷ total path walked — 100% is a straight line, low % is "
+                        "back-and-forth chop covering the same net distance.",
+             "evidence": ([f"Net move: {efficiency['net_move']:.3f}",
+                          f"Path length: {efficiency['path_length']:.3f}",
+                          "Different from market_dna's net_vs_range — this uses the actual "
+                          "bar-to-bar path, more sensitive to whipsaw."] if efficiency
+                         else ["Needs at least 5 intraday bars."])},
+            {"label": "VWAP Crossings",
+             "value": f"{crossings['count']}" if crossings else "—",
+             "color": ("#79ed8e" if crossings and crossings["count"] <= 2 else
+                      "#ff8080" if crossings and crossings["count"] > 4 else
+                      "#fabf6b" if crossings else "#8b9a9d"),
+             "context": (f"Currently {crossings['current_side']} · last crossing "
+                        f"{crossings['minutes_since_last']:.0f} min ago" if crossings and
+                        crossings["minutes_since_last"] is not None else
+                        crossings["current_side"] if crossings else "Needs at least 5 intraday bars."),
+             "evidence": ["Counted against the RUNNING (as-of-that-bar) VWAP, not the final one.",
+                         "Not scored as bullish/bearish by count alone — that relationship is "
+                         "being collected in the Signal Calibration Log for future validation, "
+                         "not assumed here."]},
         ]},
         {"label": "🌐 Market Context", "rows": [
             {"label": "Market Bias", "value": bias["recommendation"], "color": _lean_color(bias["recommendation"]),
@@ -3034,6 +3127,8 @@ def _render_zero_dte(ticker: str):
                             "momentum": ({"continuation_score_pct":
                                          momentum["continuation_score_pct"]} if momentum else None),
                             "reversal_pressure_score": reversal["reversal_pressure_score"],
+                            "trend_integrity": {"score": integrity["score"], "label": integrity["label"]},
+                            "vwap_crossings": crossings["count"] if crossings else None,
                             "timeframe_alignment": ({"aligned_direction": alignment["aligned_direction"],
                                                      "agree": alignment["agree"], "total": alignment["total"]}
                                                     if alignment["total"] else None),

@@ -14,6 +14,8 @@ from datetime import date, datetime
 import numpy as np
 import pandas as pd
 
+from . import deterministic as det
+
 DB_PATH = "iip.db"
 
 SCHEMA = """
@@ -52,10 +54,8 @@ def _rolling_vwap_side_consistency(intraday: pd.DataFrame) -> float | None:
     """Fraction of today's bars whose close sits on the same side of the RUNNING (cumulative,
     as-of-that-bar) VWAP as the final bar's close. A trend day stays on one side all session;
     chop crosses back and forth repeatedly."""
-    c, v = intraday["Close"], intraday["Volume"]
-    cum_pv = (c * v).cumsum()
-    cum_v = v.cumsum().replace(0, np.nan)
-    running_vwap = cum_pv / cum_v
+    c = intraday["Close"]
+    running_vwap = det.running_vwap(intraday)
     sides = np.sign(c - running_vwap).dropna()
     if sides.empty:
         return None
