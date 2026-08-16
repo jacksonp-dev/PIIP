@@ -664,6 +664,14 @@ def zd_fetch_chain(ticker):
     return zd.nearest_dated_chain(ticker)
 
 
+@st.cache_data(ttl=14400, show_spinner=False)
+def zd_fetch_historical_5m(ticker):
+    # 4h TTL, not 25s -- this is a slower-moving reference dataset (up to 60 days of 5m bars) for
+    # the time-of-day-adjusted relative-volume baseline, not a live quote. Re-fetching it every
+    # 30s refresh would be pointless load for data that's the same all session.
+    return zd.fetch_historical_5m(ticker)
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def get_lottery(ticker, spot, days=90):
     """A ~2×-expected-move OTM call + put at the expiry nearest `days` — the 'lottery ticket' legs.
@@ -2448,6 +2456,51 @@ def _dna_metric_display(key: str, val) -> str:
     return str(val)
 
 
+def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
+    """Live intraday candlestick chart for the 0DTE page — refreshes every 30s alongside the rest
+    of the page fragment, using the SAME 1m bars already fetched above (no new network call).
+    Same two-layer Altair wick+body recipe as _render_candlestick() (the Screener's daily-bar
+    version) for visual consistency; resamples via tf.resample_ohlc() (already built for the
+    Multi-Timeframe Alignment group) instead of a new resampling implementation, and overlays the
+    running VWAP (det.running_vwap(), already built for VWAP Crossings) rather than recomputing it."""
+    if intraday_df is None or intraday_df.empty:
+        st.info("No intraday bars available right now (market closed, or a data gap).")
+        return
+    tf_choice = st.radio("Candle timeframe", ["1m", "5m", "15m", "30m"], index=1, horizontal=True,
+                         key=f"{key_prefix}_candle_tf_{ticker}")
+    minutes = {"1m": 1, "5m": 5, "15m": 15, "30m": 30}[tf_choice]
+    vwap_1m = det.running_vwap(intraday_df)
+    if minutes == 1:
+        cdf = intraday_df.copy()
+        cdf["VWAP"] = vwap_1m
+    else:
+        cdf = tf.resample_ohlc(intraday_df, minutes)
+        if cdf.empty:
+            st.caption(f"Not enough bars yet for {tf_choice} candles.")
+            return
+        cdf["VWAP"] = vwap_1m.resample(f"{minutes}min").last()
+    cdf = cdf.reset_index()
+    cdf.columns = ["Time"] + list(cdf.columns[1:])
+    cdf["Color"] = [("#79ed8e" if c >= o else "#ff8080") for c, o in zip(cdf["Close"], cdf["Open"])]
+
+    base = alt.Chart(cdf).encode(x=alt.X("Time:T", title=None))
+    wick = base.mark_rule().encode(
+        y=alt.Y("Low:Q", title=None, scale=alt.Scale(zero=False)), y2="High:Q",
+        color=alt.Color("Color:N", scale=None),
+        tooltip=[alt.Tooltip("Time:T"), alt.Tooltip("Open:Q", format="$.2f"),
+                 alt.Tooltip("High:Q", format="$.2f"), alt.Tooltip("Low:Q", format="$.2f"),
+                 alt.Tooltip("Close:Q", format="$.2f")])
+    body = base.mark_bar(size=5).encode(
+        y="Open:Q", y2="Close:Q", color=alt.Color("Color:N", scale=None),
+        tooltip=[alt.Tooltip("Time:T"), alt.Tooltip("Open:Q", format="$.2f"),
+                 alt.Tooltip("Close:Q", format="$.2f")])
+    vwap_line = base.mark_line(color="#87d1ff", strokeWidth=1.5, strokeDash=[3, 2]).encode(
+        y=alt.Y("VWAP:Q"), tooltip=[alt.Tooltip("VWAP:Q", format="$.2f")])
+    st.altair_chart((wick + body + vwap_line).properties(height=340), width="stretch")
+    st.caption(f"{tf_choice} candles · {len(cdf)} bars · dashed line is the running VWAP · "
+              "refreshes every 30s with the rest of this page.")
+
+
 @st.fragment(run_every=30)
 def _render_zero_dte(ticker: str):
     intraday = zd_fetch_intraday()
@@ -2499,6 +2552,14 @@ def _render_zero_dte(ticker: str):
     trend_state = tf.update_trend_state(st.session_state.get(trend_state_key), alignment)
     st.session_state[trend_state_key] = trend_state
 
+    # Trend age (PIIP audit 2026-08, Batch 2): how long the CONFIRMED state has held, timestamped
+    # only when it actually changes -- same edge-trigger pattern as the Exit Quality alert below.
+    # Feeds day_regime()'s Developing-vs-Confirmed tiering.
+    trend_since_key = f"zd_trend_state_since_{ticker}"
+    if trend_state["changed"] or trend_since_key not in st.session_state:
+        st.session_state[trend_since_key] = datetime.now()
+    trend_age_minutes = (datetime.now() - st.session_state[trend_since_key]).total_seconds() / 60
+
     confluence = zd.confluence_score(bias, breadth, sector, mega, momentum, reversal, snap, alignment)
     prev_day = zd.previous_day_levels(daily.get(ticker))
     or15 = zd.opening_range(intraday.get(ticker), minutes=15)
@@ -2506,6 +2567,15 @@ def _render_zero_dte(ticker: str):
     # NVDA Relative Strength (PIIP audit 2026-08, Option C): reuses the mega-cap snapshot/intraday
     # bars already batched above -- NVDA is already fetched as part of MEGA_CAPS -- no new call.
     nvda_rs = zd.nvda_relative_strength(ticker, snap, mega_snaps.get("NVDA"), intraday.get("NVDA"))
+
+    # NVDA vs all 4 comparison tickers + leadership acceleration (PIIP audit 2026-08, Batch 2 /
+    # Phases 16-17). SMH/SOXX are new tickers in the batched fetch (see NVDA_COMPARISON_TICKERS);
+    # SPY/QQQ reuse index_snaps. Acceleration is computed straight from today's already-fetched
+    # intraday bars, no session_state needed.
+    nvda_compare_snaps = snaps_for(zd.NVDA_COMPARISON_TICKERS)
+    nvda_rs_multi = zd.nvda_relative_strength_multi(nvda_compare_snaps, mega_snaps.get("NVDA"),
+                                                     intraday.get("NVDA"))
+    nvda_rs_accel = zd.nvda_relative_strength_acceleration(intraday.get(ticker), intraday.get("NVDA"))
 
     # Trend Integrity (PIIP audit 2026-08, Batch 1): VWAP crossings + path efficiency are new
     # primitives; Trend Integrity is a synthesis of those plus alignment/confluence already
@@ -2516,6 +2586,17 @@ def _render_zero_dte(ticker: str):
     no_edge_reasons = (zd.no_clear_edge_reasons(bias, confluence, crossings, alignment, reversal)
                        if bias["recommendation"] == "NO CLEAR EDGE" else [])
     data_quality = zd.data_quality_snapshot(intraday.get(ticker), chain, tf_snapshot)
+
+    # Day Regime (PIIP audit 2026-08, Batch 2 / Phase 1) and Timeframe Sequence (Phase 8) -- both
+    # synthesize signals already computed above, no new data.
+    regime = zd.day_regime(trend_state, integrity, alignment, reversal, trend_age_minutes)
+    tf_sequence = tf.interpret_timeframe_sequence(tf_snapshot)
+
+    # Time-of-day-adjusted Relative Volume (PIIP audit 2026-08, Batch 2 / Phase 7): needs a
+    # slower, separately-cached historical fetch (see zd_fetch_historical_5m, 4h TTL) -- shown
+    # ALONGSIDE the existing rel_volume proxy in the Levels group, not replacing it.
+    historical_5m = zd_fetch_historical_5m(ticker)
+    tod_rel_vol = zd.time_of_day_relative_volume(historical_5m, intraday.get(ticker))
 
     try:
         zdlog.log_signal_snapshot(ticker, bias, confidence, entry, momentum, reversal, alignment,
@@ -2528,6 +2609,31 @@ def _render_zero_dte(ticker: str):
         mdna.log_snapshot(ticker, dna)
     except Exception:
         pass  # logging is best-effort — never break the page over a local DB write
+
+    # Day Regime (PIIP audit 2026-08, Batch 2 / Phase 1 + Phase 27): "what kind of day is this"
+    # answered FIRST, above Trade Confidence -- your own spec's own UI-priority mockup put this at
+    # the very top of the page, before any single-number score.
+    regime_colors = {"BULL CONFIRMED": "#79ed8e", "BULL DEVELOPING": "#a8e6a1",
+                     "BEAR CONFIRMED": "#ff8080", "BEAR DEVELOPING": "#f5a3a3",
+                     "NEUTRAL / CHOP": "#87d1ff", "TREND WEAKENING": "#fabf6b",
+                     "REGIME TRANSITION": "#fabf6b", "INSUFFICIENT DATA": "#8b9a9d"}
+    regime_color = regime_colors.get(regime["state"], "#8b9a9d")
+    st.markdown(f'<div style="padding:0.5rem 0.9rem;background:{regime_color}22;border:1.5px '
+               f'solid {regime_color};border-radius:8px;margin-bottom:0.5rem;">'
+               f'<span style="font-size:0.75rem;color:#8b9a9d;letter-spacing:0.05em">'
+               f'DAY REGIME — {ticker}</span><br>'
+               f'<span style="font-size:1.4rem;font-weight:800;color:{regime_color}">'
+               f'{regime["state"]}</span>'
+               f'{f" · {regime['trend_age_minutes']:.0f} min" if regime.get("trend_age_minutes") else ""}'
+               f'</div>', unsafe_allow_html=True)
+    with st.expander("Why this regime?", expanded=False):
+        for r in regime["reasons"]:
+            st.write(f"• {r}")
+        st.caption("Synthesizes Trend State (iip/timeframe.py) + Trend Integrity — a reuse of "
+                  "signals already computed elsewhere on this page, not a new independent read. "
+                  "Thresholds (10 min / 50 integrity / 40 integrity / 60 reversal pressure) are a "
+                  "first-pass guess, flagged for calibration once real sessions accumulate in the "
+                  "Signal Calibration Log below.")
 
     # ── Hero: the one number worth seeing without scrolling ──
     conf_color = _score_color(confidence["score"])
@@ -2638,6 +2744,10 @@ def _render_zero_dte(ticker: str):
             tf_bits = " · ".join(f"{lbl} {'✓' if avail else '✗'}"
                                  for lbl, avail in data_quality["timeframe_availability"].items())
             st.caption(f"Timeframe availability: {tf_bits}")
+
+    with st.container(border=True):
+        st.markdown(f"**📊 Intraday Chart — {ticker}**")
+        _render_intraday_candlestick(ticker, intraday.get(ticker), key_prefix="zd")
 
     st.caption("Tap any row to see the evidence behind its number.")
 
@@ -2805,8 +2915,26 @@ def _render_zero_dte(ticker: str):
              "evidence": ([nvda_rs["note"],
                           f"NVDA's own intraday momentum: {nvda_rs['nvda_momentum_label'] or '—'}",
                           "A single-stock read, not a market-wide signal — context alongside "
-                          "Mega Cap Health, not its own trade signal."] if nvda_rs
+                          "Mega Cap Health, not its own trade signal."] +
+                         [f"vs {tk}: {r['label']} ({r['spread_pct']:+.2f}pt)"
+                          for tk, r in nvda_rs_multi.items() if r] if nvda_rs
                          else ["Needs a live NVDA snapshot — check back during market hours."])},
+            {"label": "NVDA RS Acceleration",
+             "value": nvda_rs_accel["trend"] if nvda_rs_accel else "—",
+             "color": ("#79ed8e" if nvda_rs_accel and nvda_rs_accel["trend"] == "Accelerating" else
+                      "#ff8080" if nvda_rs_accel and nvda_rs_accel["trend"] == "Fading" else
+                      "#87d1ff" if nvda_rs_accel else "#8b9a9d"),
+             "context": (f"{nvda_rs_accel['readings']['30m_ago']:+.2f} → "
+                        f"{nvda_rs_accel['readings']['15m_ago']:+.2f} → "
+                        f"{nvda_rs_accel['readings']['now']:+.2f} pt"
+                        if nvda_rs_accel and nvda_rs_accel["trend"] != "Insufficient session history"
+                        else "Needs at least 30 minutes of today's session for both NVDA and "
+                             f"{ticker}."),
+             "evidence": ["Is NVDA's lead over the selected index widening (Accelerating), holding "
+                         "(Stable), or narrowing (Fading) — from 3 actual point-in-time reads, "
+                         "not session-state accumulation.",
+                         "Whether accelerating relative strength predicts anything about what "
+                         "happens next hasn't been validated — this is a descriptive read only."]},
         ]},
         {"label": f"\U0001f4d0 Levels — {ticker}", "rows": [
             {"label": "VWAP", "value": f"${snap['vwap']:.2f}",
@@ -2822,6 +2950,22 @@ def _render_zero_dte(ticker: str):
              "evidence": [f"Today's volume: {snap['today_volume']:,.0f}",
                          f"20-day avg: {snap['avg20_volume']:,.0f}" if snap.get("avg20_volume") else "20-day avg: —",
                          "Reads low before market close — partial-day volume, not time-of-day adjusted."]},
+            {"label": "Relative Volume (time-of-day)",
+             "value": f"{tod_rel_vol['ratio']:.2f}x" if tod_rel_vol and tod_rel_vol["ratio"] else "—",
+             "color": ("#79ed8e" if tod_rel_vol and tod_rel_vol["ratio"] and tod_rel_vol["ratio"] > 1.3 else
+                      "#ff8080" if tod_rel_vol and tod_rel_vol["ratio"] and tod_rel_vol["ratio"] < 0.7 else
+                      "#87d1ff" if tod_rel_vol else "#8b9a9d"),
+             "context": (f"vs avg volume by THIS point in the session, {tod_rel_vol['sample_days']} "
+                        f"trading days" if tod_rel_vol else
+                        "Needs a successful historical 5m-bar fetch — see Data Quality."),
+             "evidence": ([f"Actual: {tod_rel_vol['actual_volume']:,.0f}",
+                          f"Expected by now: {tod_rel_vol['expected_volume']:,.0f}",
+                          f"Method: {tod_rel_vol['method']}",
+                          "The row above (plain 'Relative Volume') compares against a full prior "
+                          "day's average and reads low before the close — this one compares "
+                          "against the historical average AT THIS SAME POINT in the session."]
+                         if tod_rel_vol else ["Historical 5m-bar fetch unavailable right now — "
+                                             "the plain Relative Volume row above still works."])},
             {"label": "Previous Day",
              "value": f"C ${prev_day['close']:.2f}" if prev_day else "—",
              "color": (("#79ed8e" if snap["last"] >= prev_day["close"] else "#ff8080") if prev_day else "#8b9a9d"),
@@ -2884,6 +3028,13 @@ def _render_zero_dte(ticker: str):
              "context": alignment["note"],
              "evidence": [f"{lbl}: {d} {'✓' if ok else '✗'}" for lbl, d, ok in alignment["checks"]]
                         or ["No timeframe has enough of today's session printed yet."]},
+            {"label": "Timeframe Sequence", "value": tf_sequence["interpretation"],
+             "color": ("#79ed8e" if "BULL" in tf_sequence["interpretation"] else
+                      "#ff8080" if "BEAR" in tf_sequence["interpretation"] else
+                      "#fabf6b" if "TRANSITION" in tf_sequence["interpretation"] else "#87d1ff"),
+             "context": tf_sequence["note"],
+             "evidence": [f"{lbl}: {d}" for lbl, d in tf_sequence["sequence"]]
+                        or ["Not enough available timeframes yet."]},
             {"label": "Trend State", "value": trend_state["state"],
              "color": ("#79ed8e" if trend_state["state"] == "Uptrend" else
                       "#ff8080" if trend_state["state"] == "Downtrend" else
@@ -3122,13 +3273,17 @@ def _render_zero_dte(ticker: str):
                             "sector_health_pct": sector["overall_confirmation_pct"],
                             "mega_cap_health": mega["score"],
                             "nvda_relative_strength": ({"label": nvda_rs["label"],
-                                                        "spread_pct": nvda_rs["spread_pct"]}
+                                                        "spread_pct": nvda_rs["spread_pct"],
+                                                        "acceleration": nvda_rs_accel["trend"]
+                                                        if nvda_rs_accel else None}
                                                        if nvda_rs else None),
                             "momentum": ({"continuation_score_pct":
                                          momentum["continuation_score_pct"]} if momentum else None),
                             "reversal_pressure_score": reversal["reversal_pressure_score"],
                             "trend_integrity": {"score": integrity["score"], "label": integrity["label"]},
                             "vwap_crossings": crossings["count"] if crossings else None,
+                            "day_regime": regime["state"],
+                            "timeframe_sequence": tf_sequence["interpretation"],
                             "timeframe_alignment": ({"aligned_direction": alignment["aligned_direction"],
                                                      "agree": alignment["agree"], "total": alignment["total"]}
                                                     if alignment["total"] else None),

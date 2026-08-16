@@ -47,7 +47,13 @@ SECTOR_ETFS = {"Technology": "XLK", "Financials": "XLF", "Industrials": "XLI",
 
 VIX_TICKER = "^VIX"
 
-ALL_BASKET_TICKERS = sorted(set(INDEX_TICKERS + MEGA_CAPS + list(SECTOR_ETFS.values()) + [VIX_TICKER]))
+# NVDA is a top-weighted holding in all 4 -- SPY and QQQ already come from INDEX_TICKERS, SMH and
+# SOXX (semiconductor ETFs) are net-new fetches for the NVDA relative-strength comparison (PIIP
+# audit 2026-08, Batch 2 / Phase 16). Still one batched call, not a new polling source.
+NVDA_COMPARISON_TICKERS = ["SPY", "QQQ", "SMH", "SOXX"]
+
+ALL_BASKET_TICKERS = sorted(set(INDEX_TICKERS + MEGA_CAPS + list(SECTOR_ETFS.values()) +
+                                [VIX_TICKER] + NVDA_COMPARISON_TICKERS))
 
 
 def _split_multi(raw: pd.DataFrame, tickers: list[str]) -> dict[str, pd.DataFrame]:
@@ -285,7 +291,8 @@ def options_health(chain: dict, spot: float) -> dict | None:
 # NVDA is a component of SPY, QQQ, and DIA (joined the Dow Nov 2024) but NOT IWM (Russell 2000 is
 # small-caps only) -- the relative-strength read below is still shown for IWM since it's useful
 # cross-asset context, but the note makes clear NVDA isn't part of that index's own math.
-_NVDA_INDEX_MEMBER = {"SPY": True, "QQQ": True, "DIA": True, "IWM": False}
+_NVDA_INDEX_MEMBER = {"SPY": True, "QQQ": True, "DIA": True, "IWM": False,
+                      "SMH": True, "SOXX": True}
 
 
 def nvda_relative_strength(ticker: str, index_snap: dict, nvda_snap: dict | None,
@@ -311,6 +318,54 @@ def nvda_relative_strength(ticker: str, index_snap: dict, nvda_snap: dict | None
                     f"itself, not an independent confirmation." if is_member else
                     f"NVDA is NOT a component of {ticker} ({ticker} is small/mid-cap-weighted) — "
                     "this is cross-asset risk-sentiment context only, not index math.")}
+
+
+def nvda_relative_strength_multi(index_snaps: dict, nvda_snap: dict | None,
+                                 nvda_intraday: pd.DataFrame | None) -> dict:
+    """PIIP audit 2026-08, Batch 2 (Phase 16, partial): NVDA relative strength vs all 4 comparison
+    tickers at once (SPY/QQQ/SMH/SOXX), not just the currently-selected index -- reuses
+    nvda_relative_strength() per ticker rather than a second implementation. True 'ex-NVDA index'
+    construction (NVDA's OWN move backed out of the index) needs live constituent WEIGHTS for
+    QQQ/SMH/SOXX, which have no reliable free source -- deliberately NOT attempted here, per the
+    spec's own instruction not to fabricate an approximation when the underlying data isn't
+    available; this stays a straightforward (and honestly labeled) relative-strength comparison."""
+    return {tk: nvda_relative_strength(tk, index_snaps[tk], nvda_snap, nvda_intraday)
+           for tk in NVDA_COMPARISON_TICKERS if index_snaps.get(tk)}
+
+
+def _day_change_at(df: pd.DataFrame, target_ts) -> float | None:
+    """Day-change % as of the bar closest to (but not after) `target_ts`, from bars already
+    fetched -- the building block for nvda_relative_strength_acceleration()'s 3 point-in-time
+    reads below."""
+    day_open = df["Open"].iloc[0]
+    sub = df[df.index <= target_ts]
+    if sub.empty or not day_open:
+        return None
+    return float(sub["Close"].iloc[-1] / day_open - 1) * 100
+
+
+def nvda_relative_strength_acceleration(index_intraday: pd.DataFrame | None,
+                                        nvda_intraday: pd.DataFrame | None) -> dict | None:
+    """PIIP audit 2026-08, Batch 2 (Phase 17): is NVDA's leadership over the index ACCELERATING,
+    STABLE, or FADING -- computed from 3 actual point-in-time reads (30 min ago, 15 min ago, now)
+    taken directly from today's already-fetched intraday bars for both series. Deliberately reads
+    straight from the bars rather than accumulating readings in session_state across refreshes,
+    so it works the same on the very first load of the day as on the 50th refresh."""
+    if index_intraday is None or nvda_intraday is None or index_intraday.empty or nvda_intraday.empty:
+        return None
+    now_ts = index_intraday.index[-1]
+    readings = {}
+    for label, minutes_ago in (("30m_ago", 30), ("15m_ago", 15), ("now", 0)):
+        target = now_ts - pd.Timedelta(minutes=minutes_ago)
+        idx_chg = _day_change_at(index_intraday, target)
+        nvda_chg = _day_change_at(nvda_intraday, target)
+        readings[label] = round(nvda_chg - idx_chg, 2) if idx_chg is not None and nvda_chg is not None else None
+    vals = [readings["30m_ago"], readings["15m_ago"], readings["now"]]
+    if any(v is None for v in vals):
+        return {"readings": readings, "trend": "Insufficient session history"}
+    leg1, leg2 = vals[1] - vals[0], vals[2] - vals[1]
+    trend = "Accelerating" if leg1 > 0 and leg2 > 0 else "Fading" if leg1 < 0 and leg2 < 0 else "Stable / Mixed"
+    return {"readings": readings, "trend": trend}
 
 
 def available_strikes(chain: dict, direction: str) -> list[float]:
@@ -621,6 +676,102 @@ def no_clear_edge_reasons(bias: dict, confluence: dict, crossings: dict | None,
     if reversal["reversal_pressure_score"] > 60:
         reasons.append(f"Reversal pressure is elevated ({reversal['reversal_pressure_score']:.0f}/100)")
     return reasons
+
+
+def fetch_historical_5m(ticker: str, period: str = "60d") -> pd.DataFrame | None:
+    """PIIP audit 2026-08, Batch 2 (Phase 7): historical 5-minute bars for ONE ticker, for the
+    time-of-day-adjusted relative-volume baseline below. Confirmed live (2026-08): yfinance hard-
+    caps 1m bars at 8 days lookback but allows 5m bars up to 60 days -- 5m is the only granularity
+    that gets a real sample (~40 trading days) for a same-time-of-day comparison; 1m would only
+    give ~8 noisy days. A separate, slower-moving fetch from fetch_intraday_batch() (today's 1m
+    bars) -- cache this one for hours, not seconds, at the app.py layer."""
+    try:
+        raw = yf.download(tickers=[ticker], period=period, interval="5m", progress=False,
+                          auto_adjust=True)
+    except Exception:
+        return None
+    if raw is None or raw.empty:
+        return None
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw = raw[ticker] if ticker in raw.columns.get_level_values(0) else raw.droplevel(1, axis=1)
+    return raw.dropna(how="all")
+
+
+def time_of_day_relative_volume(historical_5m: pd.DataFrame | None,
+                                today_intraday: pd.DataFrame | None) -> dict | None:
+    """PIIP audit 2026-08, Batch 2 (Phase 7): actual volume accumulated by THIS POINT in today's
+    session, divided by the historical AVERAGE volume accumulated by the same point across up to
+    60 trading days -- the time-of-day-adjusted read zero_dte.py's existing `rel_volume` field
+    explicitly documents it is NOT (that one compares today's running total against a full prior
+    day's average, which reads artificially low before the close). Shown ALONGSIDE the existing
+    proxy, not replacing it -- this one depends on a slower historical fetch succeeding, the
+    existing one never fails as long as today's bars are there."""
+    if historical_5m is None or historical_5m.empty or today_intraday is None or today_intraday.empty:
+        return None
+    hist = historical_5m.copy()
+    hist["date"] = hist.index.date
+    hist = hist[hist["date"] < date.today()]   # never let today's own partial bars leak into the baseline
+    if hist.empty:
+        return None
+    hist = hist.sort_index()
+    hist["minutes"] = hist.groupby("date").cumcount() * 5
+    hist["cum_vol"] = hist.groupby("date")["Volume"].cumsum()
+
+    today_minutes = (today_intraday.index[-1] - today_intraday.index[0]).total_seconds() / 60
+    bucket = int(today_minutes // 5) * 5
+    available_buckets = sorted(hist["minutes"].unique())
+    candidates = [m for m in available_buckets if m <= bucket]
+    if not candidates:
+        return None
+    use_bucket = max(candidates)
+    at_bucket = hist[hist["minutes"] == use_bucket]
+    expected_vol = float(at_bucket["cum_vol"].mean())
+    sample_days = int(at_bucket["date"].nunique())
+    actual_vol = float(today_intraday["Volume"].sum())
+    ratio = round(actual_vol / expected_vol, 2) if expected_vol > 0 else None
+    return {"actual_volume": actual_vol, "expected_volume": round(expected_vol, 0), "ratio": ratio,
+            "sample_days": sample_days, "minutes_into_session": use_bucket,
+            "method": "5m bars, up to 60-trading-day lookback"}
+
+
+def day_regime(trend_state: dict, integrity: dict, alignment: dict, reversal: dict,
+               trend_age_minutes: float | None) -> dict:
+    """PIIP audit 2026-08, Batch 2 (Phase 1): 'what kind of trading environment is this right
+    now' -- a SYNTHESIS of iip/timeframe.py's trend_state (already directional + hysteresis-based)
+    and trend_integrity() above, deliberately NOT a third parallel state machine alongside those
+    two (and market_dna.py's separate day-SHAPE classifier, which answers a different question).
+    States: INSUFFICIENT DATA, NEUTRAL / CHOP, BULL/BEAR DEVELOPING, BULL/BEAR CONFIRMED, TREND
+    WEAKENING, REGIME TRANSITION. Thresholds below are a first-pass guess (10 min / 50 integrity /
+    40 integrity / 60 reversal pressure), same as market_dna.py's own THRESHOLDS dict -- flagged
+    for calibration once real sessions have been logged (see iip/zero_dte_log.py), not presented
+    as final."""
+    if alignment["total"] == 0:
+        return {"state": "INSUFFICIENT DATA", "direction": None, "trend_age_minutes": trend_age_minutes,
+                "reasons": ["No timeframe has enough of today's session printed yet."]}
+
+    # A hysteresis flip is actively brewing -- this takes priority over the current confirmed
+    # state, since it's the most decision-relevant fact ("something is changing right now").
+    if trend_state["pending"] != trend_state["state"]:
+        return {"state": "REGIME TRANSITION", "direction": None, "trend_age_minutes": trend_age_minutes,
+                "reasons": [f"Hysteresis pending: {trend_state['pending']} "
+                           f"({trend_state['pending_count']}/{trend_state['confirm_reads']} confirms) "
+                           f"vs current {trend_state['state']}"]}
+
+    if trend_state["state"] == "Range / Chop":
+        return {"state": "NEUTRAL / CHOP", "direction": None, "trend_age_minutes": trend_age_minutes,
+                "reasons": [f"Trend State is Range/Chop (alignment {alignment['alignment_pct']:.0f}%)"]}
+
+    direction = "BULL" if trend_state["state"] == "Uptrend" else "BEAR"
+    weakening = integrity["score"] < 40 or reversal["reversal_pressure_score"] > 60
+    if weakening and (trend_age_minutes or 0) > 10:
+        return {"state": "TREND WEAKENING", "direction": direction, "trend_age_minutes": trend_age_minutes,
+                "reasons": [f"Trend Integrity {integrity['score']:.0f}/100",
+                           f"Reversal Pressure {reversal['reversal_pressure_score']:.0f}/100"]}
+
+    tier = "CONFIRMED" if (trend_age_minutes or 0) >= 10 and integrity["score"] >= 50 else "DEVELOPING"
+    age_bit = f"{trend_age_minutes:.0f} min old" if trend_age_minutes is not None else "just started"
+    return {"state": f"{direction} {tier}", "direction": direction, "trend_age_minutes": trend_age_minutes,
+            "reasons": [f"Trend Integrity {integrity['score']:.0f}/100", f"State is {age_bit}"]}
 
 
 def data_quality_snapshot(intraday_df: pd.DataFrame | None, chain: dict | None,

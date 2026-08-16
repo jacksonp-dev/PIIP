@@ -118,6 +118,50 @@ def timeframe_alignment(snapshot: dict) -> dict:
                     if skipped else "All timeframes available.")}
 
 
+def interpret_timeframe_sequence(snapshot: dict) -> dict:
+    """PIIP audit 2026-08, Batch 2 (Phase 8): reads the SEQUENCE of available timeframes from
+    longest to shortest (Daily -> 30m -> 15m -> 5m) instead of just counting how many agree --
+    'higher timeframes bullish, shortest one bearish' is a pullback inside a bigger trend, not the
+    same thing as 'everything just turned bearish', even though timeframe_alignment() alone can't
+    tell those apart. Built entirely from the same per-timeframe directions timeframe_alignment()
+    already reads -- a different lens on the same data, not a new calculation."""
+    order = ["Daily", "30m", "15m", "5m"]
+    seq = [(label, snapshot[label]["direction"]) for label in order
+          if snapshot.get(label, {}).get("available")]
+    if len(seq) < 2:
+        return {"interpretation": "INSUFFICIENT TIMEFRAMES", "sequence": seq,
+                "note": "Needs at least 2 available timeframes to read a sequence."}
+
+    dirs = [d for _, d in seq]
+    if all(d == dirs[0] for d in dirs) and dirs[0] != "Flat":
+        return {"interpretation": f"{dirs[0].upper()} ALIGNED ACROSS ALL TIMEFRAMES",
+                "sequence": seq, "note": "Every available timeframe agrees."}
+
+    # Anchor on the LONGEST available timeframe's direction and see how much of the shorter end
+    # disagrees with it -- one disagreeing (the shortest) reads as a pullback inside the trend;
+    # several disagreeing reads as real pressure; ALL of them disagreeing reads as a possible
+    # regime transition (the anchor itself may be about to flip).
+    higher_dir, shorter_dirs = dirs[0], dirs[1:]
+    if higher_dir != "Flat" and shorter_dirs:
+        disagree_count = sum(1 for d in shorter_dirs if d != higher_dir)
+        if 0 < disagree_count < len(shorter_dirs):
+            if disagree_count == 1 and shorter_dirs[-1] != higher_dir:
+                return {"interpretation": f"{higher_dir.upper()} HIGHER-TIMEFRAME TREND — "
+                                          "SHORT-TERM PULLBACK",
+                        "sequence": seq, "note": "Only the shortest available timeframe disagrees "
+                                                 "— likely noise inside the trend."}
+            return {"interpretation": f"{higher_dir.upper()} TREND UNDER SHORT-TERM PRESSURE",
+                    "sequence": seq, "note": f"{disagree_count} of {len(shorter_dirs)} shorter "
+                                             "timeframes disagree — more than a single-bar pullback."}
+        if disagree_count == len(shorter_dirs):
+            return {"interpretation": "POTENTIAL REGIME TRANSITION", "sequence": seq,
+                    "note": f"Every shorter timeframe disagrees with the longest available one "
+                           f"({higher_dir}) — the anchor itself may be about to flip."}
+
+    return {"interpretation": "MIXED — NO CLEAR TIMEFRAME SEQUENCE", "sequence": seq,
+            "note": "No clean higher/lower-timeframe pattern in what's available right now."}
+
+
 def update_trend_state(prev_state: dict | None, alignment: dict, confirm_reads: int = 2) -> dict:
     """Hysteresis state machine so the 'trend state' label doesn't flip on one noisy 30s refresh.
     A candidate direction (from timeframe_alignment, requiring >=60% agreement among available

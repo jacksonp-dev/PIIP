@@ -227,7 +227,9 @@ def zero_dte_scoped_signals(signals: dict, name: str) -> dict:
                "timeframe_alignment": signals.get("timeframe_alignment"),
                "trend_state": signals.get("trend_state"),
                "trend_integrity": signals.get("trend_integrity"),
-               "vwap_crossings": signals.get("vwap_crossings")}
+               "vwap_crossings": signals.get("vwap_crossings"),
+               "day_regime": signals.get("day_regime"),
+               "timeframe_sequence": signals.get("timeframe_sequence")}
     if name == "Options & Positioning Agent":
         return {**common, "options_health": signals.get("options_health"),
                "dealer_positioning": signals.get("dealer_positioning"),

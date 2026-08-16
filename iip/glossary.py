@@ -147,6 +147,20 @@ GLOSSARY: dict[str, str] = {
     "Trend Efficiency": "Net move ÷ total path walked (Kaufman-style efficiency). 100% is a straight line; a low "
                        "% means the price covered a lot of back-and-forth ground to end up where it did — the "
                        "same net % move can be a clean trend or pure chop depending on this number.",
+    "Day Regime": "'What kind of trading environment is this right now' -- BULL/BEAR DEVELOPING or CONFIRMED, "
+                 "NEUTRAL/CHOP, TREND WEAKENING, REGIME TRANSITION, or INSUFFICIENT DATA. A synthesis of Trend "
+                 "State and Trend Integrity already computed elsewhere on this page, not a new independent read.",
+    "Timeframe Sequence": "Reads the 5m/15m/30m/Daily directions as a SEQUENCE (longest to shortest) instead of "
+                         "just counting how many agree -- e.g. 'higher timeframes bullish, 5m bearish' reads as "
+                         "a pullback inside a bigger trend, not a full reversal.",
+    "Relative Volume (time-of-day)": "Today's volume so far vs the historical AVERAGE volume by this SAME point "
+                                    "in the session (5-minute bars, up to a 60-trading-day lookback — the "
+                                    "longest free yfinance allows). The true time-of-day-adjusted version of the "
+                                    "plain Relative Volume row, which compares against a full prior day's "
+                                    "average and reads low before the close.",
+    "NVDA RS Acceleration": "Is NVDA's outperformance (or underperformance) vs the selected index widening, "
+                           "holding, or narrowing — from 3 actual readings (30 min ago, 15 min ago, now), not "
+                           "session-state guessing. Descriptive only; not validated as predictive of anything.",
     "VWAP Crossings": "How many times price has crossed the RUNNING (as-of-that-bar) VWAP today. A clean trend "
                      "day tends to cross rarely; a chop day crosses back and forth. The relationship between "
                      "crossing count and what happens next is being collected for future validation, not "
@@ -370,6 +384,24 @@ GLOSSARY_GROUPS: list = [
         ("Exit Quality", "Unlocked once you flip 'I'm in a trade.' Watches whether the market's bias has flipped "
                          "against your chosen direction so you notice a real change of conditions — it never "
                          "auto-exits you, that call stays yours."),
+        ("Day Regime", "The very first thing this page answers: what kind of trading environment is this right "
+                       "now. States: INSUFFICIENT DATA, NEUTRAL/CHOP, BULL/BEAR DEVELOPING, BULL/BEAR CONFIRMED, "
+                       "TREND WEAKENING, REGIME TRANSITION. A synthesis of Trend State and Trend Integrity, not "
+                       "a new independent judgment — see the 'Why this regime?' expander for the exact reasons."),
+        ("Timeframe Sequence", "Reads the available 5m/15m/30m/Daily directions as an ordered SEQUENCE (longest "
+                              "to shortest) instead of just an agree-count — distinguishes 'bullish trend, "
+                              "short-term pullback' from 'everything just turned bearish', which Timeframe "
+                              "Alignment's raw count alone can't tell apart."),
+        ("Relative Volume (time-of-day)", "The time-of-day-adjusted version of Relative Volume above — actual "
+                                          "volume so far divided by the historical average volume by this SAME "
+                                          "point in the session, using up to 60 trading days of 5-minute bars "
+                                          "(yfinance's longest free lookback at that granularity). Shown "
+                                          "alongside, not replacing, the simpler proxy version."),
+        ("NVDA RS Acceleration", "Whether NVDA's relative strength lead (or lag) vs the selected index is "
+                                "widening, holding, or narrowing, from 3 real point-in-time readings (30 min "
+                                "ago, 15 min ago, now). Descriptive only — not validated as predicting anything."),
+        ("Intraday Chart", "A live candlestick chart of today's session (1m/5m/15m/30m, your choice) with the "
+                           "running VWAP overlaid, refreshing every 30s alongside the rest of the page."),
         ("Trend Integrity", "How clean and persistent the current trend is (0-100) — a synthesis of Timeframe "
                             "Alignment, Trend Efficiency, VWAP-crossing discipline, and how many other signals "
                             "structurally confirm it. A market up 0.8% with 1 VWAP crossing and 90% trend "
