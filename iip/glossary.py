@@ -124,6 +124,14 @@ GLOSSARY: dict[str, str] = {
     "QQQ Health": "A 0-100 composite of trend, momentum, buying pressure, structure, and relative volume for QQQ.",
     "IWM Health": "A 0-100 composite of trend, momentum, buying pressure, structure, and relative volume for IWM.",
     "DIA Health": "A 0-100 composite of trend, momentum, buying pressure, structure, and relative volume for DIA.",
+    "NVDA Health": "A 0-100 composite of trend, momentum, buying pressure, structure, and relative volume for "
+                  "NVDA — available since NVDA became a selectable ticker on the 0DTE page (PIIP audit 2026-08).",
+    "Regime Timeline": "Today's actual Day Regime state changes, in order, with the real measured reasons behind "
+                      "each one (never reconstructed after the fact) — lets you see WHEN the read changed and WHY.",
+    "Historical Regime Stats": "On-demand (not auto-computed every refresh): what tended to happen next when this "
+                              "exact Day Regime state occurred before, at several forward horizons. Shows "
+                              "INSUFFICIENT SAMPLE instead of a fabricated number whenever there isn't yet enough "
+                              "logged history for a real statistic — collection only started 2026-08-15.",
     "Reversal Pressure": "A heuristic score (not a calibrated probability) for whether the CURRENT move looks "
                         "like it's strengthening or running out of steam (price/RSI divergence, VWAP "
                         "overextension) — does NOT predict tops or call exact turns.",
@@ -402,6 +410,12 @@ GLOSSARY_GROUPS: list = [
                                 "ago, 15 min ago, now). Descriptive only — not validated as predicting anything."),
         ("Intraday Chart", "A live candlestick chart of today's session (1m/5m/15m/30m, your choice) with the "
                            "running VWAP overlaid, refreshing every 30s alongside the rest of the page."),
+        ("Regime Timeline", "Today's actual Day Regime state changes in order, with the real measured reasons "
+                           "behind each one — lets you see WHEN the read changed and WHY, not just what it is now."),
+        ("Historical Regime Stats", "On-demand (click to compute, not automatic every refresh): what tended to "
+                                   "happen next when this exact Day Regime state occurred before. Shows "
+                                   "INSUFFICIENT SAMPLE instead of a fabricated number until there's real logged "
+                                   "history behind it — collection only started 2026-08-15."),
         ("Trend Integrity", "How clean and persistent the current trend is (0-100) — a synthesis of Timeframe "
                             "Alignment, Trend Efficiency, VWAP-crossing discipline, and how many other signals "
                             "structurally confirm it. A market up 0.8% with 1 VWAP crossing and 90% trend "

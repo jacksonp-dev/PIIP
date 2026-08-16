@@ -1,8 +1,12 @@
 """0DTE Index Intelligence — Phase 1, free-tier.
 
 NOT a trading bot. Never places trades, never says "buy now." Helps read the market's current
-condition for manual 0DTE decisions on SPY/QQQ/IWM/DIA — the only tickers where "0DTE" and
-index-relative concepts (mega-cap health, sector confirmation, breadth) actually mean something.
+condition for manual 0DTE decisions on SPY/QQQ/IWM/DIA — the tickers where "0DTE" and index-
+relative concepts (mega-cap health, sector confirmation, breadth) actually mean something — plus
+NVDA (PIIP audit 2026-08, Batch 3), analyzed short-dated/near-0DTE where available since NVDA
+doesn't list same-day expiries the way the index ETFs do (nearest_dated_chain() already falls back
+to the closest available expiry). The index-relative rows (Breadth, Sector Health, Mega Cap
+Health) stay market-wide background context when NVDA is the selected ticker, not NVDA-specific.
 
 Design rules, enforced not aspirational:
   * Every score is a sum of named, itemized point contributions returned alongside the total —
@@ -32,6 +36,13 @@ from . import data
 from . import deterministic as det
 
 INDEX_TICKERS = ["SPY", "QQQ", "IWM", "DIA"]
+
+# PIIP audit 2026-08, Batch 3: NVDA is selectable on this page too, alongside the 4 index ETFs --
+# short-dated/near-0DTE where available (NVDA doesn't list same-day expiries like the index ETFs
+# do; nearest_dated_chain() already falls back to the closest available expiry, so this is a
+# UI/analysis-scope change, not a new options-fetch behavior). Already fetched as part of
+# MEGA_CAPS below, so adding it here is free -- no new network call.
+ANALYSIS_TICKERS = INDEX_TICKERS + ["NVDA"]
 
 # Approximate relative influence on SPY — NOT official S&P weights (no free source for live index
 # weights). Used only to rank which mega-caps matter most for Mega Cap Health, not for precise

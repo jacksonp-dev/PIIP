@@ -2513,7 +2513,10 @@ def _render_zero_dte(ticker: str):
     mega_snaps = snaps_for(zd.MEGA_CAPS)
     sector_snaps = snaps_for(list(zd.SECTOR_ETFS.values()))
     vix_snap = zd.ticker_snapshot("^VIX", intraday, daily)
-    snap = index_snaps.get(ticker)
+    # NVDA is a selectable ticker on this page too (PIIP audit 2026-08, Batch 3) but isn't one of
+    # the 4 INDEX_TICKERS -- it's already fetched as part of MEGA_CAPS, so no new network call,
+    # just a second place to look it up.
+    snap = index_snaps.get(ticker) or mega_snaps.get(ticker)
 
     st.caption(f"⏱️ As of {datetime.now().strftime('%H:%M:%S')} — refreshes every 30s")
     if not snap:
@@ -2566,16 +2569,23 @@ def _render_zero_dte(ticker: str):
 
     # NVDA Relative Strength (PIIP audit 2026-08, Option C): reuses the mega-cap snapshot/intraday
     # bars already batched above -- NVDA is already fetched as part of MEGA_CAPS -- no new call.
-    nvda_rs = zd.nvda_relative_strength(ticker, snap, mega_snaps.get("NVDA"), intraday.get("NVDA"))
+    # Skipped entirely when NVDA itself is the selected ticker (Batch 3: NVDA is now selectable on
+    # this page) -- comparing NVDA against NVDA is meaningless, not just an edge case to degrade.
+    is_nvda_focus = (ticker == "NVDA")
+    nvda_rs = None if is_nvda_focus else \
+        zd.nvda_relative_strength(ticker, snap, mega_snaps.get("NVDA"), intraday.get("NVDA"))
 
     # NVDA vs all 4 comparison tickers + leadership acceleration (PIIP audit 2026-08, Batch 2 /
     # Phases 16-17). SMH/SOXX are new tickers in the batched fetch (see NVDA_COMPARISON_TICKERS);
     # SPY/QQQ reuse index_snaps. Acceleration is computed straight from today's already-fetched
-    # intraday bars, no session_state needed.
+    # intraday bars, no session_state needed. Both still make sense when NVDA IS the focus ticker
+    # (NVDA vs the broader indices/semis ETFs is exactly the useful read there), so NOT gated on
+    # is_nvda_focus the way the single-ticker nvda_rs row above is.
     nvda_compare_snaps = snaps_for(zd.NVDA_COMPARISON_TICKERS)
     nvda_rs_multi = zd.nvda_relative_strength_multi(nvda_compare_snaps, mega_snaps.get("NVDA"),
                                                      intraday.get("NVDA"))
-    nvda_rs_accel = zd.nvda_relative_strength_acceleration(intraday.get(ticker), intraday.get("NVDA"))
+    nvda_rs_accel = None if is_nvda_focus else \
+        zd.nvda_relative_strength_acceleration(intraday.get(ticker), intraday.get("NVDA"))
 
     # Trend Integrity (PIIP audit 2026-08, Batch 1): VWAP crossings + path efficiency are new
     # primitives; Trend Integrity is a synthesis of those plus alignment/confluence already
@@ -2600,9 +2610,22 @@ def _render_zero_dte(ticker: str):
 
     try:
         zdlog.log_signal_snapshot(ticker, bias, confidence, entry, momentum, reversal, alignment,
-                                  trend_state)
+                                  trend_state, spot_price=snap["last"], day_regime=regime["state"])
     except Exception:
         pass  # calibration logging is best-effort -- never break the page over a local DB write
+
+    # Regime transition timeline (PIIP audit 2026-08, Batch 3 / Phase 9): edge-triggered, only
+    # logs when the Day Regime state actually CHANGES since the last read -- same was_alert/
+    # is_alert pattern the Exit Quality alert below already uses. Never one row per 30s refresh.
+    regime_prev_key = f"zd_regime_prev_{ticker}"
+    prev_regime_state = st.session_state.get(regime_prev_key)
+    if prev_regime_state is not None and prev_regime_state != regime["state"]:
+        try:
+            zdlog.log_regime_transition(ticker, prev_regime_state, regime["state"],
+                                        regime["reasons"], regime.get("trend_age_minutes"))
+        except Exception:
+            pass
+    st.session_state[regime_prev_key] = regime["state"]
 
     dna = mdna.classify(snap, intraday.get(ticker), daily.get(ticker))
     try:
@@ -2729,6 +2752,51 @@ def _render_zero_dte(ticker: str):
             else:
                 st.caption("No snapshots logged yet for this ticker — starts collecting on the "
                           "next refresh.")
+
+            # State Timeline (PIIP audit 2026-08, Batch 3 / Phase 9): today's actual Day Regime
+            # transitions, edge-triggered-logged above -- reads back what really happened, never
+            # reconstructs history after the fact.
+            st.markdown("**🕰️ Today's Regime Timeline**")
+            timeline = zdlog.regime_timeline(ticker)
+            if timeline:
+                for t in timeline:
+                    ts_short = t["ts"].split("T")[-1] if "T" in t["ts"] else t["ts"].split(" ")[-1]
+                    reasons_bit = "; ".join(t["reasons"]) if t["reasons"] else ""
+                    st.write(f"**{ts_short}** {t['from_state'] or '—'} → {t['to_state']}"
+                            + (f"  \n_{reasons_bit}_" if reasons_bit else ""))
+            else:
+                st.caption("No regime changes logged yet today — the state has held steady since "
+                          "this page started tracking it, or this is the first read of the day.")
+
+            # Historical Regime Stats (PIIP audit 2026-08, Batch 3 / Phases 12-13): on-demand,
+            # NOT auto-computed every 30s refresh (this project's own performance rule -- separate
+            # live state from historical validation, see zero_dte.py module notes). Expect
+            # INSUFFICIENT SAMPLE almost everywhere right now -- collection only started
+            # 2026-08-15, that's correct honesty, not a bug to fix.
+            st.markdown("**📈 Historical Regime Stats**")
+            if st.button("Compute (reads the Signal Calibration Log, may take a moment)",
+                        key=f"zd_regime_stats_btn_{ticker}"):
+                st.session_state[f"zd_regime_stats_{ticker}"] = zdlog.regime_stats(ticker)
+            stats = st.session_state.get(f"zd_regime_stats_{ticker}")
+            if stats:
+                if not stats["groups"]:
+                    st.caption(stats["note"])
+                else:
+                    st.caption(f"{stats['total_snapshots']:,} total logged snapshots with a "
+                              f"recorded price. {stats['note']}")
+                    for state, horizons in stats["groups"].items():
+                        st.write(f"**{state}**")
+                        for h, s in horizons.items():
+                            if s["status"] == "INSUFFICIENT SAMPLE":
+                                st.caption(f"　{h}: INSUFFICIENT SAMPLE (N={s['n']}, "
+                                          f"need {s['min_needed']}+)")
+                            else:
+                                st.write(f"　{h}: N={s['n']} · {s['positive_rate_pct']:.0f}% positive "
+                                        f"· avg {s['avg_return_pct']:+.3f}% · median "
+                                        f"{s['median_return_pct']:+.3f}% · range "
+                                        f"[{s['worst_pct']:+.2f}%, {s['best_pct']:+.2f}%]")
+            else:
+                st.caption("Not computed yet this session — click the button above.")
 
             # Data Quality panel (PIIP audit 2026-08, Batch 1 / Phase 22): consolidates the
             # freshness/proxy caveats already scattered across this page's captions into one
@@ -2904,37 +2972,44 @@ def _render_zero_dte(ticker: str):
             {"label": "Mega Cap Health", "value": f"{mega['score']:.0f}/100", "color": _score_color(mega["score"]),
              "context": f"{mega['weighted_avg_change_pct']:+.2f}% wtd avg (approx. SPY weights)",
              "evidence": [f"{tk}: {d['day_change_pct']:+.2f}% (weight {d['weight']:.1f})" for tk, d in top_movers]},
-            {"label": "NVDA Relative Strength",
-             "value": nvda_rs["label"] if nvda_rs else "—",
-             "color": ("#79ed8e" if nvda_rs and nvda_rs["label"] == "Outperforming" else
-                      "#ff8080" if nvda_rs and nvda_rs["label"] == "Underperforming" else
-                      "#87d1ff" if nvda_rs else "#8b9a9d"),
-             "context": (f"NVDA {nvda_rs['nvda_day_change_pct']:+.2f}% vs {ticker} "
-                        f"{nvda_rs['index_day_change_pct']:+.2f}% (spread {nvda_rs['spread_pct']:+.2f}pt)"
-                        if nvda_rs else "NVDA data unavailable right now."),
-             "evidence": ([nvda_rs["note"],
-                          f"NVDA's own intraday momentum: {nvda_rs['nvda_momentum_label'] or '—'}",
-                          "A single-stock read, not a market-wide signal — context alongside "
-                          "Mega Cap Health, not its own trade signal."] +
-                         [f"vs {tk}: {r['label']} ({r['spread_pct']:+.2f}pt)"
-                          for tk, r in nvda_rs_multi.items() if r] if nvda_rs
-                         else ["Needs a live NVDA snapshot — check back during market hours."])},
-            {"label": "NVDA RS Acceleration",
-             "value": nvda_rs_accel["trend"] if nvda_rs_accel else "—",
-             "color": ("#79ed8e" if nvda_rs_accel and nvda_rs_accel["trend"] == "Accelerating" else
-                      "#ff8080" if nvda_rs_accel and nvda_rs_accel["trend"] == "Fading" else
-                      "#87d1ff" if nvda_rs_accel else "#8b9a9d"),
-             "context": (f"{nvda_rs_accel['readings']['30m_ago']:+.2f} → "
-                        f"{nvda_rs_accel['readings']['15m_ago']:+.2f} → "
-                        f"{nvda_rs_accel['readings']['now']:+.2f} pt"
-                        if nvda_rs_accel and nvda_rs_accel["trend"] != "Insufficient session history"
-                        else "Needs at least 30 minutes of today's session for both NVDA and "
-                             f"{ticker}."),
-             "evidence": ["Is NVDA's lead over the selected index widening (Accelerating), holding "
-                         "(Stable), or narrowing (Fading) — from 3 actual point-in-time reads, "
-                         "not session-state accumulation.",
-                         "Whether accelerating relative strength predicts anything about what "
-                         "happens next hasn't been validated — this is a descriptive read only."]},
+            *([{"label": "NVDA Relative Strength",
+                "value": nvda_rs["label"] if nvda_rs else "—",
+                "color": ("#79ed8e" if nvda_rs and nvda_rs["label"] == "Outperforming" else
+                         "#ff8080" if nvda_rs and nvda_rs["label"] == "Underperforming" else
+                         "#87d1ff" if nvda_rs else "#8b9a9d"),
+                "context": (f"NVDA {nvda_rs['nvda_day_change_pct']:+.2f}% vs {ticker} "
+                           f"{nvda_rs['index_day_change_pct']:+.2f}% (spread {nvda_rs['spread_pct']:+.2f}pt)"
+                           if nvda_rs else "NVDA data unavailable right now."),
+                "evidence": ([nvda_rs["note"],
+                             f"NVDA's own intraday momentum: {nvda_rs['nvda_momentum_label'] or '—'}",
+                             "A single-stock read, not a market-wide signal — context alongside "
+                             "Mega Cap Health, not its own trade signal."] if nvda_rs
+                            else ["Needs a live NVDA snapshot — check back during market hours."])},
+               {"label": "NVDA RS Acceleration",
+                "value": nvda_rs_accel["trend"] if nvda_rs_accel else "—",
+                "color": ("#79ed8e" if nvda_rs_accel and nvda_rs_accel["trend"] == "Accelerating" else
+                         "#ff8080" if nvda_rs_accel and nvda_rs_accel["trend"] == "Fading" else
+                         "#87d1ff" if nvda_rs_accel else "#8b9a9d"),
+                "context": (f"{nvda_rs_accel['readings']['30m_ago']:+.2f} → "
+                           f"{nvda_rs_accel['readings']['15m_ago']:+.2f} → "
+                           f"{nvda_rs_accel['readings']['now']:+.2f} pt"
+                           if nvda_rs_accel and nvda_rs_accel["trend"] != "Insufficient session history"
+                           else "Needs at least 30 minutes of today's session for both NVDA and "
+                                f"{ticker}."),
+                "evidence": ["Is NVDA's lead over the selected index widening (Accelerating), holding "
+                            "(Stable), or narrowing (Fading) — from 3 actual point-in-time reads, "
+                            "not session-state accumulation.",
+                            "Whether accelerating relative strength predicts anything about what "
+                            "happens next hasn't been validated — this is a descriptive read only."]}]
+              if not is_nvda_focus else []),
+            {"label": "NVDA vs Indices/Semis ETFs",
+             "value": f"{sum(1 for r in nvda_rs_multi.values() if r and r['label'] == 'Outperforming')}"
+                      f"/{len(nvda_rs_multi)} Outperforming" if nvda_rs_multi else "—",
+             "color": "#87d1ff",
+             "context": "NVDA's day-change spread vs SPY, QQQ, SMH, and SOXX, each shown separately.",
+             "evidence": [f"vs {tk}: {r['label']} ({r['spread_pct']:+.2f}pt) — {r['note']}"
+                         for tk, r in nvda_rs_multi.items() if r]
+                        or ["Needs a live NVDA snapshot — check back during market hours."]},
         ]},
         {"label": f"\U0001f4d0 Levels — {ticker}", "rows": [
             {"label": "VWAP", "value": f"${snap['vwap']:.2f}",
@@ -3250,15 +3325,27 @@ def _render_zero_dte(ticker: str):
                         mkt_open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
                         mkt_close_et = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
                         in_session = mkt_open_et <= now_et <= mkt_close_et
+                        # Expiry note is now conditional on the ACTUAL fetched chain (PIIP audit
+                        # 2026-08, Batch 3: NVDA is selectable here too and doesn't list same-day
+                        # expiries the way the index ETFs do) -- never assume 0DTE just because
+                        # this is the "0DTE Intelligence" page.
+                        chain_expires_today = bool(chain) and chain.get("expiry") == date.today().isoformat()
+                        if in_session and chain_expires_today:
+                            expiry_note = "These options expire at TODAY's market close (~16:00 ET)."
+                        elif in_session and chain:
+                            expiry_note = (f"Nearest listed expiry is {chain['expiry']} — NOT 0DTE "
+                                          f"for {ticker} today.")
+                        elif in_session:
+                            expiry_note = "No listed options chain available right now."
+                        else:
+                            expiry_note = ("Outside regular market hours (9:30-16:00 ET) -- signals "
+                                          "may reflect the last completed session, not a live one.")
                         session_timing = {
                             "current_time_et": now_et.strftime("%H:%M:%S"),
                             "session_minutes_elapsed": dna.get("metrics", {}).get("session_minutes"),
                             "minutes_until_close": (round((mkt_close_et - now_et).total_seconds() / 60)
                                                     if in_session else None),
-                            "note": ("These options expire at TODAY's market close (~16:00 ET)."
-                                    if in_session else
-                                    "Outside regular market hours (9:30-16:00 ET) -- signals may "
-                                    "reflect the last completed session, not a live one."),
+                            "note": expiry_note,
                         }
                         signals = {
                             "ticker": ticker,
@@ -3417,7 +3504,7 @@ if nav == "0DTE Intelligence":
         "require a **paid real-time feed (~0.5s latency)**, which this app does not currently have. "
         "Treat every number on this page as directional research context, not a timing signal.")
 
-    zd_ticker = st.radio("Index", zd.INDEX_TICKERS, horizontal=True, key="zd_ticker")
+    zd_ticker = st.radio("Ticker", zd.ANALYSIS_TICKERS, horizontal=True, key="zd_ticker")
     _render_zero_dte(zd_ticker)
 
 # ─────────────────────────── Lottery (gambling) ───────────────────────────
