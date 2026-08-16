@@ -428,14 +428,20 @@ def reversal_engine(momentum: dict | None, tech: dict, snap: dict) -> dict:
 
 
 def confluence_score(bias: dict, breadth: dict, sector: dict, mega: dict,
-                     momentum: dict | None, reversal: dict, snap: dict) -> dict:
+                     momentum: dict | None, reversal: dict, snap: dict,
+                     alignment: dict | None = None) -> dict:
     """How many independent signals actually agree with Market Bias's own lean, itemized.
 
     market_bias() already computes something like this internally (an "agree" count feeding its
     own confidence number) but never surfaces the count itself. Direction-aware: every check is
     scored FOR the bias's own lean, not "is this bullish" in isolation -- so when bias is bearish,
     a confirming DECLINE correctly counts as agreement, not as a red flag. Same itemized,
-    no-black-box shape as every other score in this module."""
+    no-black-box shape as every other score in this module.
+
+    `alignment` (optional, from iip.timeframe.timeframe_alignment(), PIIP audit 2026-08 Option B):
+    adds one more itemized check for whether the multi-timeframe read agrees with bias's lean.
+    Optional and keyword-compatible so existing callers/tests that don't pass it still work
+    unchanged -- when omitted the check is simply left out, not scored as a fail."""
     lean = 1 if bias["raw_signed"] >= 0 else -1
     sector_confirm = sector["overall_confirmation_pct"] if lean > 0 else (100 - sector["overall_confirmation_pct"])
     mega_confirm = mega["score"] if lean > 0 else (100 - mega["score"])
@@ -449,6 +455,9 @@ def confluence_score(bias: dict, breadth: dict, sector: dict, mega: dict,
         ("Reversal Pressure is low", reversal["reversal_pressure_score"] < 40),
         ("Relative Volume confirms conviction", (snap.get("rel_volume") or 0) > 1.0),
     ]
+    if alignment and alignment["total"] > 0:
+        bias_dir = "Bullish" if lean > 0 else "Bearish"
+        checks.append(("Multi-timeframe alignment agrees", alignment["aligned_direction"] == bias_dir))
     agree = sum(1 for _, ok in checks if ok)
     return {"agree": agree, "total": len(checks), "checks": checks,
             "lean_label": "CALLS" if lean > 0 else "PUTS"}

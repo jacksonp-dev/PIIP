@@ -127,6 +127,20 @@ GLOSSARY: dict[str, str] = {
     "Reversal Pressure": "A heuristic score (not a calibrated probability) for whether the CURRENT move looks "
                         "like it's strengthening or running out of steam (price/RSI divergence, VWAP "
                         "overextension) — does NOT predict tops or call exact turns.",
+    "5m Momentum": "Velocity/acceleration momentum computed on 5-minute resampled bars — same heuristic-score "
+                  "formula as the page's plain Momentum, just at an explicit, labeled window.",
+    "15m Momentum": "Velocity/acceleration momentum computed on 15-minute resampled bars — needs ~2.5 hours of "
+                   "today's session before it's available.",
+    "30m Momentum": "Velocity/acceleration momentum computed on 30-minute resampled bars — needs ~5 hours of "
+                   "today's session before it's available.",
+    "Daily Trend": "The existing daily EMA20/50/200 alignment, reused as one more timeframe in the alignment "
+                  "stack — the session's broader trend context, not an intraday read.",
+    "Timeframe Alignment": "How many of the available timeframes (5m/15m/30m/Daily) agree on direction right "
+                          "now. Timeframes without enough of today's session yet are listed separately, not "
+                          "silently dropped.",
+    "Trend State": "'Uptrend' / 'Downtrend' / 'Range / Chop,' derived from Timeframe Alignment with hysteresis — "
+                  "a new state needs 2 consecutive 30-second refreshes agreeing before it's displayed, so it "
+                  "doesn't flip on single-bar noise.",
     "Options Health": "Liquidity/execution quality of the options chain right now — tight spreads and real open "
                       "interest/volume mean you can actually get in and out at a fair price.",
     "Dealer Positioning": "An ESTIMATE of options dealers' net gamma exposure (GEX) from open interest. Positive/"
@@ -376,6 +390,21 @@ GLOSSARY_GROUPS: list = [
                               "move looks like it's strengthening or running out of steam, from price/RSI "
                               "divergence and how far price has stretched from VWAP. Does NOT predict exact "
                               "tops or bottoms, and hasn't been validated against historical outcomes."),
+        ("5m/15m/30m Momentum", "The same velocity/acceleration momentum read as 'Momentum (continuation)' above, "
+                                "but computed separately at each explicit window — resampling the same intraday "
+                                "bars, no new data. Added because the page's plain 'Momentum' number was always a "
+                                "silent ~5-minute read; this lets you tell a 5-minute pop apart from a genuine "
+                                "30-minute trend. A timeframe shows '—' until enough of today's session has "
+                                "printed for that window (e.g. 30m needs 5 hours)."),
+        ("Daily Trend", "The existing daily EMA20/50/200 alignment, reused here as one more timeframe in the "
+                        "alignment stack — the session's broader trend context, not an intraday read."),
+        ("Timeframe Alignment", "How many of the available timeframes (5m/15m/30m/Daily) agree on direction right "
+                                "now, e.g. '3/4 Bullish.' Timeframes without enough of today's session yet are "
+                                "listed separately, not silently dropped or counted against it."),
+        ("Trend State", "'Uptrend' / 'Downtrend' / 'Range / Chop,' derived from Timeframe Alignment but with "
+                        "hysteresis: a new state must show up on 2 consecutive 30-second refreshes before it's "
+                        "actually displayed, so the label doesn't flip back and forth on single-bar noise. Not a "
+                        "prediction of what happens next — a smoothed read of what's happening right now."),
         ("Options Health", "Liquidity/execution quality of the options chain right now — tight bid/ask spreads and "
                            "real open interest/volume mean you can actually get filled at a fair price, not just a "
                            "quoted one."),

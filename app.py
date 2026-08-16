@@ -41,6 +41,7 @@ from iip import screener
 from iip import scorer
 from iip import sec_edgar
 from iip import social
+from iip import timeframe as tf
 from iip import watchlist as wl
 from iip import zero_dte as zd
 
@@ -2485,7 +2486,19 @@ def _render_zero_dte(ticker: str):
     reversal = zd.reversal_engine(momentum, snap["tech"], snap)
     entry = zd.entry_quality(bias, health, momentum, opt, dealer, breadth)
     confidence = zd.trade_confidence(bias, entry, opt)
-    confluence = zd.confluence_score(bias, breadth, sector, mega, momentum, reversal, snap)
+
+    # Multi-timeframe alignment (PIIP audit 2026-08, Option B): resamples the SAME 1m bars already
+    # fetched above into 5m/15m/30m, no new network call, plus the existing daily EMA alignment as
+    # a "Daily" timeframe — see iip/timeframe.py's module docstring for why 60m isn't attempted.
+    # Trend state persists across this fragment's 30s reruns via session_state, same edge-trigger
+    # pattern the Exit Quality alert below already uses.
+    tf_snapshot = tf.multi_timeframe_snapshot(intraday.get(ticker), snap["tech"])
+    alignment = tf.timeframe_alignment(tf_snapshot)
+    trend_state_key = f"zd_trend_state_{ticker}"
+    trend_state = tf.update_trend_state(st.session_state.get(trend_state_key), alignment)
+    st.session_state[trend_state_key] = trend_state
+
+    confluence = zd.confluence_score(bias, breadth, sector, mega, momentum, reversal, snap, alignment)
     prev_day = zd.previous_day_levels(daily.get(ticker))
     or15 = zd.opening_range(intraday.get(ticker), minutes=15)
 
@@ -2681,6 +2694,38 @@ def _render_zero_dte(ticker: str):
              "evidence": ["Does NOT predict tops — estimates whether the current move is "
                          "strengthening or weakening.",
                          "A heuristic score, not a calibrated probability of reversal."]},
+        ]},
+        {"label": "🕰️ Multi-Timeframe Alignment", "rows": [
+            *[{"label": f"{label} Momentum" if label != "Daily" else "Daily Trend",
+               "value": r["direction"] if r["available"] else "—",
+               "color": ("#79ed8e" if r.get("direction") == "Bullish" else
+                        "#ff8080" if r.get("direction") == "Bearish" else
+                        "#87d1ff" if r.get("available") else "#8b9a9d"),
+               "context": (f"Score {r['continuation_score_pct']:.0f} · {r['bars_used']} {label} bars"
+                          if r["available"] and "continuation_score_pct" in r else
+                          r.get("note", "") if r["available"] else r["note"]),
+               "evidence": ([f"Velocity: {r['velocity_pct']:+.3f}%", f"Acceleration: {r['acceleration_pct']:+.3f}%",
+                            "Heuristic score, not a calibrated probability."] if "velocity_pct" in r
+                           else [r.get("note", "Existing daily EMA20/50/200 alignment, reused as the "
+                                              "session's broader trend context.")])}
+              for label, r in tf_snapshot.items()],
+            {"label": "Timeframe Alignment",
+             "value": f"{alignment['agree']}/{alignment['total']} {alignment['aligned_direction']}"
+                      if alignment["total"] else "—",
+             "color": _lean_color(alignment["aligned_direction"]) if alignment["total"] else "#8b9a9d",
+             "context": alignment["note"],
+             "evidence": [f"{lbl}: {d} {'✓' if ok else '✗'}" for lbl, d, ok in alignment["checks"]]
+                        or ["No timeframe has enough of today's session printed yet."]},
+            {"label": "Trend State", "value": trend_state["state"],
+             "color": ("#79ed8e" if trend_state["state"] == "Uptrend" else
+                      "#ff8080" if trend_state["state"] == "Downtrend" else
+                      "#87d1ff" if trend_state["state"] == "Range / Chop" else "#8b9a9d"),
+             "context": (f"Pending: {trend_state['pending']} ({trend_state['pending_count']}/"
+                        f"{trend_state['confirm_reads']} confirms)" if trend_state["pending"] != trend_state["state"]
+                        else "Confirmed"),
+             "evidence": [f"Requires {trend_state['confirm_reads']} consecutive 30s reads agreeing "
+                         "before the state changes — avoids flipping on single-bar noise.",
+                         f"Latest raw candidate this read: {trend_state['candidate']}"]},
         ]},
         {"label": "⚙️ Options & Dealer", "rows": [
             {"label": "Options Health",
@@ -2911,6 +2956,10 @@ def _render_zero_dte(ticker: str):
                             "momentum": ({"continuation_score_pct":
                                          momentum["continuation_score_pct"]} if momentum else None),
                             "reversal_pressure_score": reversal["reversal_pressure_score"],
+                            "timeframe_alignment": ({"aligned_direction": alignment["aligned_direction"],
+                                                     "agree": alignment["agree"], "total": alignment["total"]}
+                                                    if alignment["total"] else None),
+                            "trend_state": trend_state["state"],
                             "entry_quality": entry["score"],
                             "confluence": f"{confluence['agree']}/{confluence['total']}",
                             "options_health": opt["execution_quality"] if opt else None,
