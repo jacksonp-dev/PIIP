@@ -42,6 +42,7 @@ from iip import scorer
 from iip import sec_edgar
 from iip import social
 from iip import timeframe as tf
+from iip import update_check
 from iip import watchlist as wl
 from iip import zero_dte as zd
 from iip import zero_dte_log as zdlog
@@ -599,6 +600,15 @@ def get_intraday_snapshot(tk):
 @st.cache_data(ttl=900, show_spinner=False)
 def run_scan():
     return scanner.scan()
+
+
+# 12h TTL (PIIP audit 2026-08) -- a version check has no reason to hit the network more than a
+# couple times a day; iip/update_check.py already swallows every failure (offline, GitHub down,
+# repo not public) and returns None rather than raising, so caching a None result just means the
+# next real attempt happens on the next cache expiry, never a stuck error state.
+@st.cache_data(ttl=43200, show_spinner=False)
+def check_for_piip_update():
+    return update_check.check_for_update(GITHUB_REPO)
 
 
 # 5min TTL, not the 30s the rest of 0DTE Intelligence refreshes at -- yields/DXY/oil/equal-weight
@@ -1653,6 +1663,24 @@ with st.sidebar:
                     st.session_state.nav = "Ticker Page"
                     st.session_state["search_expanded"] = False
                     st.rerun()
+
+    # Update notice (PIIP audit 2026-08): sidebar footer, visible on every page. Checks GitHub's
+    # raw-content CDN for a newer VERSION file, cached 12h so this never hits the network on every
+    # rerun -- any failure (offline, GitHub down, repo not public) is swallowed silently inside
+    # check_for_update(), never blocking or erroring the app. Shows the current version either way
+    # so there's always an easy answer to "what version am I even running."
+    st.divider()
+    _update_info = check_for_piip_update()
+    if _update_info and _update_info["update_available"]:
+        st.success(f"🎉 Update available: v{_update_info['remote_version']} "
+                  f"(you're on v{_update_info['local_version']})")
+        st.link_button("⬇️ Get the latest version", f"https://github.com/{GITHUB_REPO}",
+                       width="stretch")
+        if _update_info.get("changelog"):
+            with st.expander("📋 What's new"):
+                st.markdown(_update_info["changelog"])
+    else:
+        st.caption(f"PIIP v{update_check.local_version()}")
 nav = st.session_state.nav
 if "prev_last_visit" not in st.session_state:
     # Once per browser SESSION, not per rerun -- otherwise "since last visit" would read back as
