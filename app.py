@@ -2575,6 +2575,64 @@ def _dna_metric_display(key: str, val) -> str:
     return str(val)
 
 
+def _render_lightweight_lines(series: dict, key_prefix: str, colors: dict | None = None,
+                              height: int = 320, intraday: bool = False):
+    """Generic multi-line Lightweight Charts renderer -- PIIP audit 2026-08, shared by the
+    Research page's daily Close/SMA50/SMA200 chart and its intraday price/VWAP chart (both are
+    just N line series over time, no candles/volume needed, so this avoids a 3rd/4th copy of the
+    same chart-boilerplate JS). `series` is {label: pd.Series indexed by date/datetime}.
+    `intraday=True` uses the ET-seconds time format (see _et_seconds()); False uses the plain
+    {year, month, day} format the daily-bar charts use (no time-of-day component to get wrong)."""
+    series = {label: s.dropna() for label, s in series.items() if s is not None and not s.dropna().empty}
+    if not series:
+        st.info("No data available.")
+        return
+    default_colors = ["#87d1ff", "#c792ea", "#82aaff", "#79ed8e", "#ff8080"]
+    colors = colors or {}
+    chart_id = f"{key_prefix}_lines".replace(" ", "_")
+    payload_series = {}
+    for i, (label, s) in enumerate(series.items()):
+        if intraday:
+            pts = [{"time": _et_seconds(ts), "value": round(float(v), 4)} for ts, v in s.items()]
+        else:
+            pts = [{"time": {"year": int(ts.year), "month": int(ts.month), "day": int(ts.day)},
+                    "value": round(float(v), 4)} for ts, v in s.items()]
+        payload_series[label] = {"points": pts, "color": colors.get(label, default_colors[i % len(default_colors)])}
+    payload = json.dumps(payload_series)
+    legend_html = "".join(
+        f'<span style="margin-right:1rem"><span style="color:{d["color"]}">●</span> {label}</span>'
+        for label, d in payload_series.items())
+    html = f"""
+<div style="font-size:0.78rem;color:#8b9a9d;margin-bottom:0.3rem">{legend_html}</div>
+<div id="{chart_id}" style="width:100%;height:{height}px;"></div>
+<script>{_load_lightweight_charts_js()}</script>
+<script>
+(function() {{
+  const data = {payload};
+  const container = document.getElementById("{chart_id}");
+  const chart = LightweightCharts.createChart(container, {{
+    autoSize: true,
+    layout: {{ background: {{ type: "solid", color: "transparent" }}, textColor: "#8b9a9d" }},
+    grid: {{ vertLines: {{ color: "#1c2426" }}, horzLines: {{ color: "#1c2426" }} }},
+    rightPriceScale: {{ borderColor: "#232b2d" }},
+    timeScale: {{ borderColor: "#232b2d", timeVisible: {str(intraday).lower()} }},
+    crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
+  }});
+  for (const label in data) {{
+    const s = data[label];
+    const lineSeries = chart.addSeries(LightweightCharts.LineSeries, {{
+      color: s.color, lineWidth: 2, title: label,
+      lastValueVisible: true, priceLineVisible: false,
+    }});
+    lineSeries.setData(s.points);
+  }}
+  chart.timeScale().fitContent();
+}})();
+</script>
+"""
+    st.iframe(html, height=height + 30)
+
+
 def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
     """Live intraday candlestick chart for the 0DTE page — refreshes every 30s alongside the rest
     of the page fragment, using the SAME 1m bars already fetched above (no new network call).
@@ -4097,12 +4155,18 @@ if nav == "Research":
             spot = float(prices["Close"].iloc[-1])
             st.metric(f"{ticker} — {get_company_info(ticker).get('name') or ticker}", f"${spot:,.2f}")
 
-            chart = pd.DataFrame({
-                "Close": prices["Close"],
-                "SMA50": prices["Close"].rolling(50).mean(),
-                "SMA200": prices["Close"].rolling(200).mean(),
-            }).tail(400)
-            st.line_chart(chart)
+            # PIIP audit 2026-08: rolling SMAs computed on the FULL price history first, THEN
+            # windowed to the last 400 for display -- same as the original st.line_chart version,
+            # so SMA200 near the start of the visible window still reflects 200 real days of
+            # history, not a truncated average starting from nothing.
+            close_full = prices["Close"]
+            sma50_full = close_full.rolling(50).mean()
+            sma200_full = close_full.rolling(200).mean()
+            _render_lightweight_lines(
+                {"Close": close_full.tail(400), "SMA50": sma50_full.tail(400),
+                 "SMA200": sma200_full.tail(400)},
+                key_prefix=f"research_daily_{ticker}",
+                colors={"Close": "#87d1ff", "SMA50": "#c792ea", "SMA200": "#79ed8e"})
 
             with st.container(border=True):
                 st.subheader("⚡ Intraday snapshot (for active watching)")
@@ -4118,7 +4182,10 @@ if nav == "Research":
                     ic[1].metric("vs VWAP", f"{snap['pct_from_vwap']:+.1f}%")
                     ic[2].metric("Range position", f"{snap['range_pos']:.0f}%")
                     ic[3].metric("Today range", f"${snap['low']:.2f}–${snap['high']:.2f}")
-                    st.line_chart(snap["chart"])
+                    _render_lightweight_lines(
+                        {"Price": snap["chart"]["price"], "VWAP": snap["chart"]["VWAP"]},
+                        key_prefix=f"research_intraday_{ticker}", height=220, intraday=True,
+                        colors={"Price": "#87d1ff", "VWAP": "#c792ea"})
                     st.caption("VWAP = today's volume-weighted avg price. **Above VWAP** = buyers in control "
                                "intraday; **below** = sellers. Range position: 0% = at the day's low, 100% = at "
                                "the high. **Descriptive only — this does NOT predict the next few hours.** For "
