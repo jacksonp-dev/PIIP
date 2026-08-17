@@ -2753,7 +2753,17 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
     layout: {{ background: {{ type: "solid", color: "transparent" }}, textColor: "#8b9a9d" }},
     grid: {{ vertLines: {{ color: "#1c2426" }}, horzLines: {{ color: "#1c2426" }} }},
     rightPriceScale: {{ borderColor: "#232b2d" }},
-    timeScale: {{ borderColor: "#232b2d", timeVisible: true, secondsVisible: false }},
+    // shiftVisibleRangeOnNewBar defaults to true in Lightweight Charts -- documented, known
+    // behavior (see github.com/tradingview/lightweight-charts issue #549): whenever the last bar
+    // is visible, EVERY setData() call (this chart gets one every 30s from the page's own auto-
+    // refresh) auto-shifts the view rightward to keep following the latest bar. That's exactly
+    // what was fighting our own pan/zoom restore below -- confirmed via a live CDP-driven browser
+    // session against the running app that our explicit setVisibleRange() call was being
+    // silently overridden shortly after we made it. Disabling it here is the documented fix, not
+    // a timing workaround: this chart already has its own explicit "extend to now" / restore-
+    // saved-position logic, so the library's auto-follow is redundant and actively harmful here.
+    timeScale: {{ borderColor: "#232b2d", timeVisible: true, secondsVisible: false,
+                 shiftVisibleRangeOnNewBar: false }},
     crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
   }});
 
