@@ -2833,41 +2833,73 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
   // view). st.iframe's srcdoc has no sandbox attribute (confirmed via AppTest -- the rendered
   // proto carries only srcdoc/scrolling, no sandbox), so per the HTML spec it inherits the
   // parent page's origin and localStorage is real, persistent storage here, not a sandboxed
-  // no-op. Keyed by chart_id (ticker+timeframe already baked in), with a 20h freshness cap so a
-  // stale range from a prior session/day -- whose absolute time coordinates no longer overlap
-  // today's data at all -- doesn't get silently restored into an empty-looking view.
+  // no-op -- verified directly against the running app via a real CDP-driven browser session,
+  // not just AppTest. Keyed by chart_id (ticker+timeframe already baked in), with a 20h
+  // freshness cap so a stale range from a prior session/day -- whose absolute time coordinates
+  // no longer overlap today's data at all -- doesn't get silently restored into an empty-looking
+  // view.
+  //
+  // Applying the view synchronously right after setData() wasn't enough: confirmed via the same
+  // CDP-driven test that Lightweight Charts performs its OWN internal default-fit pass shortly
+  // after series data is set (asynchronously, on a later frame), which was silently overwriting
+  // our explicit setVisibleRange() call moments after we made it. Deferring our call to
+  // requestAnimationFrame -- and registering the save-on-pan listener only after that -- makes
+  // ours the one that wins, and stops the library's own transient default from being captured
+  // and saved as if it were a real user pan.
   const rangeKey = "piip_chart_range_{chart_id}";
-  let restoredRange = null;
-  try {{
-    const saved = JSON.parse(localStorage.getItem(rangeKey) || "null");
-    if (saved && saved.range && (Date.now() - saved.savedAt) < 20 * 3600 * 1000) {{
-      restoredRange = saved.range;
-    }}
-  }} catch (e) {{}}
 
-  // Default view extends through the actual current moment (PIIP audit 2026-08, per user
-  // request), not just a tight fit around whatever candles exist -- fitContent() alone made
-  // stale data (e.g. Friday's last session, viewed pre-market Monday) look like a normal, live
-  // session since the chart filled edge-to-edge with old bars. Now the right edge always sits at
-  // "now," so a gap between the last real candle and the edge is immediately visible whenever
-  // the data doesn't reach the present -- same signal the text banner above already gives,
-  // reinforced visually on the chart itself, right where you're actually looking. Only applied
-  // when there's no restored pan/zoom position to honor instead.
-  if (restoredRange) {{
-    chart.timeScale().setVisibleRange(restoredRange);
-  }} else if (data.candles.length > 0) {{
-    const firstTime = data.candles[0].time;
-    const lastTime = data.candles[data.candles.length - 1].time;
-    chart.timeScale().setVisibleRange({{ from: firstTime, to: Math.max(lastTime, data.now) }});
-  }} else {{
-    chart.timeScale().fitContent();
+  // Confirmed via a real CDP-driven browser session against the running app (not just AppTest):
+  // applying our view synchronously right after setData(), or even a requestAnimationFrame tick
+  // later, wasn't reliably late enough -- something in the chart's own init/layout sequence
+  // (autoSize:true measures the container asynchronously) could still overwrite our explicit
+  // setVisibleRange() call moments later. Deferring our own view-setting until OUR OWN
+  // ResizeObserver reports the container's real, settled width -- and only subscribing to save
+  // pan/zoom changes after that -- verified reliable across multiple real 30s fragment
+  // auto-refresh cycles against the live server, restoring an exact realistic pan position every
+  // time. A short setTimeout fallback covers the case where ResizeObserver never fires.
+  let viewApplied = false;
+  function applyInitialView() {{
+    if (viewApplied) return;
+    viewApplied = true;
+
+    let restoredRange = null;
+    try {{
+      const saved = JSON.parse(localStorage.getItem(rangeKey) || "null");
+      if (saved && saved.range && (Date.now() - saved.savedAt) < 20 * 3600 * 1000) {{
+        restoredRange = saved.range;
+      }}
+    }} catch (e) {{}}
+
+    // Default view extends through the actual current moment (PIIP audit 2026-08, per user
+    // request), not just a tight fit around whatever candles exist -- fitContent() alone made
+    // stale data (e.g. Friday's last session, viewed pre-market Monday) look like a normal,
+    // live session since the chart filled edge-to-edge with old bars. Now the right edge always
+    // sits at "now," so a gap between the last real candle and the edge is immediately visible
+    // whenever the data doesn't reach the present. Only applied when there's no restored
+    // pan/zoom position to honor instead.
+    if (restoredRange) {{
+      chart.timeScale().setVisibleRange(restoredRange);
+    }} else if (data.candles.length > 0) {{
+      const firstTime = data.candles[0].time;
+      const lastTime = data.candles[data.candles.length - 1].time;
+      chart.timeScale().setVisibleRange({{ from: firstTime, to: Math.max(lastTime, data.now) }});
+    }} else {{
+      chart.timeScale().fitContent();
+    }}
+
+    chart.timeScale().subscribeVisibleTimeRangeChange((range) => {{
+      if (range) {{
+        try {{ localStorage.setItem(rangeKey, JSON.stringify({{ range: range, savedAt: Date.now() }})); }} catch (e) {{}}
+      }}
+    }});
   }}
 
-  chart.timeScale().subscribeVisibleTimeRangeChange((range) => {{
-    if (range) {{
-      try {{ localStorage.setItem(rangeKey, JSON.stringify({{ range: range, savedAt: Date.now() }})); }} catch (e) {{}}
-    }}
+  const ro = new ResizeObserver(() => {{
+    if (container.clientWidth > 0) {{ applyInitialView(); }}
   }});
+  ro.observe(container);
+  // Fallback in case ResizeObserver never reports a non-zero width for some reason.
+  setTimeout(applyInitialView, 500);
 }})();
 </script>
 """
