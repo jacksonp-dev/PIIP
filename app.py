@@ -3984,25 +3984,38 @@ if nav == "Lottery":
 
 # ─────────────────────────── Paper account ───────────────────────────
 if nav == "Paper":
-    st.caption("Your **$1,000 paper options account**. Every trade is saved to disk (`iip.db`) and "
-               "survives a crash or restart. Fills at mid-price, no commission — real trading pays the "
-               "bid-ask spread + fees, so treat results as optimistic. Open positions marked live.")
+    # PIIP audit 2026-08, per user request: the starting balance was already fully configurable
+    # in the data layer (portfolio.get_or_create()/reset() both take a `start` param, $1,000 was
+    # only ever the app.py CALL SITE's hardcoded default) -- just needed a UI to actually offer it.
+    # Caption reads the account's REAL start_cash, not a hardcoded "$1,000", so it stays accurate
+    # after someone resets with a different amount.
+    _paper_start = _fetch_paper_summary()["start"]
+    st.caption(f"Your **${_paper_start:,.0f} paper options account**. Every trade is saved to disk "
+              "(`iip.db`) and survives a crash or restart. Fills at mid-price, no commission — real "
+              "trading pays the bid-ask spread + fees, so treat results as optimistic. Open "
+              "positions marked live.")
     btns = st.columns([1, 1, 4])
     if btns[0].button("🔄 Refresh prices"):
         st.session_state["paper_stale"] = True
         st.rerun()
-    if btns[1].button("↻ Reset to $1,000"):
+    if btns[1].button("↻ Reset account"):
         st.session_state["confirm_paper_reset"] = True
     if st.session_state.get("confirm_paper_reset"):
         with st.container(border=True):
             st.warning("⚠️ This permanently deletes every open/closed position and the equity "
                       "history for this account. There's no undo.")
+            new_start = st.number_input(
+                "Starting balance", min_value=1.0, max_value=10_000_000.0,
+                value=float(_paper_start), step=100.0, format="%.2f",
+                key="paper_reset_start_input",
+                help="Pick whatever you want to paper-trade with — $1,000 is just the default, "
+                     "not a limit.")
             cc1, cc2 = st.columns(2)
             if cc1.button("Yes, reset everything", type="primary", key="confirm_reset_yes"):
-                portfolio.reset(DB, 1000.0)
+                portfolio.reset(DB, float(new_start))
                 st.session_state["paper_stale"] = True
                 st.session_state["confirm_paper_reset"] = False
-                st.success("Account reset to $1,000.")
+                st.success(f"Account reset to ${new_start:,.2f}.")
                 st.rerun()
             if cc2.button("Cancel", key="confirm_reset_no"):
                 st.session_state["confirm_paper_reset"] = False
