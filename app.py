@@ -2641,287 +2641,6 @@ def _render_zero_dte(ticker: str):
     except Exception:
         pass  # logging is best-effort — never break the page over a local DB write
 
-    # Day Regime (PIIP audit 2026-08, Batch 2 / Phase 1 + Phase 27): "what kind of day is this"
-    # answered FIRST, above Trade Confidence -- your own spec's own UI-priority mockup put this at
-    # the very top of the page, before any single-number score.
-    regime_colors = {"BULL CONFIRMED": "#79ed8e", "BULL DEVELOPING": "#a8e6a1",
-                     "BEAR CONFIRMED": "#ff8080", "BEAR DEVELOPING": "#f5a3a3",
-                     "NEUTRAL / CHOP": "#87d1ff", "TREND WEAKENING": "#fabf6b",
-                     "REGIME TRANSITION": "#fabf6b", "INSUFFICIENT DATA": "#8b9a9d"}
-    regime_color = regime_colors.get(regime["state"], "#8b9a9d")
-    st.markdown(f'<div style="padding:0.5rem 0.9rem;background:{regime_color}22;border:1.5px '
-               f'solid {regime_color};border-radius:8px;margin-bottom:0.5rem;">'
-               f'<span style="font-size:0.75rem;color:#8b9a9d;letter-spacing:0.05em">'
-               f'DAY REGIME — {ticker}</span><br>'
-               f'<span style="font-size:1.4rem;font-weight:800;color:{regime_color}">'
-               f'{regime["state"]}</span>'
-               f'{f" · {regime['trend_age_minutes']:.0f} min" if regime.get("trend_age_minutes") else ""}'
-               f'</div>', unsafe_allow_html=True)
-    with st.expander("Why this regime?", expanded=False):
-        for r in regime["reasons"]:
-            st.write(f"• {r}")
-        st.caption("Synthesizes Trend State (iip/timeframe.py) + Trend Integrity — a reuse of "
-                  "signals already computed elsewhere on this page, not a new independent read. "
-                  "Thresholds (10 min / 50 integrity / 40 integrity / 60 reversal pressure) are a "
-                  "first-pass guess, flagged for calibration once real sessions accumulate in the "
-                  "Signal Calibration Log below.")
-
-    # ── Hero: the one number worth seeing without scrolling ──
-    conf_color = _score_color(confidence["score"])
-    with st.container(border=True):
-        hc1, hc2 = st.columns([3, 2])
-        with hc1:
-            st.caption(f"{ticker} · TRADE CONFIDENCE")
-            st.markdown(f'<div style="font-size:2.6rem;font-weight:800;color:{conf_color};'
-                        f'line-height:1.1">{confidence["score"]:.0f}/100 &nbsp; '
-                        f'<span style="font-size:1.6rem">{confidence["bias_direction"]}</span></div>',
-                        unsafe_allow_html=True)
-            dna_line = "Insufficient evidence" if dna["label"] == "Insufficient Evidence" else dna["label"]
-            st.caption(f"Market DNA: **{dna_line}** — {dna['note']}")
-            st.caption("⚠️ Backtested Jul 2023–2026 (546 days, reusing this exact scoring code): "
-                      "even the highest-confidence bucket hit ~57% next-day directional accuracy — "
-                      "statistically indistinguishable from SPY's own 57.3% base rate over the same "
-                      "period. This score has not been shown to beat the market's baseline. Treat it "
-                      "as an internal-agreement heuristic, not a track record.")
-            # NO CLEAR EDGE (PIIP audit 2026-08, Batch 1 / Phase 21): a first-class, EXPLAINED
-            # outcome -- only renders when Market Bias itself has no real lean, and only shows
-            # reasons already computed elsewhere on the page, never a new judgment.
-            if no_edge_reasons:
-                reasons_html = "".join(f"<li>{_esc(r)}</li>" for r in no_edge_reasons)
-                st.markdown(f'<div style="margin-top:0.6rem;padding:0.6rem 0.8rem;background:'
-                           f'#2a2415;border:1px solid #5a4c2c;border-radius:6px;">'
-                           f'<b style="color:#fabf6b">⚠️ NO CLEAR EDGE</b>'
-                           f'<ul style="margin:0.3rem 0 0 1.1rem;padding:0;font-size:0.85rem;'
-                           f'color:#e8ecec">{reasons_html}</ul></div>', unsafe_allow_html=True)
-        with hc2:
-            # Confluence: how many independent signals actually agree with the bias's own lean --
-            # market_bias() already counts this internally to build its own confidence number, but
-            # never showed the count itself. One glanceable line here (the "quick look" the user
-            # asked for); the full itemized ✓/✗ breakdown lives in the expander below, not here,
-            # so the hero stays a fast read instead of turning into an 8-line checklist.
-            conf_ratio = confluence["agree"] / confluence["total"] if confluence["total"] else 0.0
-            confluence_color = "#79ed8e" if conf_ratio >= 0.7 else "#fabf6b" if conf_ratio >= 0.4 else "#ff8080"
-            st.markdown(f'<div style="font-weight:700;margin-bottom:0.3rem">'
-                        f'Confluence: <span style="color:{confluence_color}">'
-                        f'{confluence["agree"]}/{confluence["total"]} signals agree</span></div>',
-                        unsafe_allow_html=True)
-            for mark, label in confidence["checks"]:
-                st.write(f"{mark} {label}")
-        with st.expander("Confluence breakdown, Market DNA metrics, and Catalyst Terminal"):
-            st.markdown(f"**Confluence detail — {confluence['lean_label']} lean**")
-            # Colored 2-column tile grid, not a flat list of plain-text ✓/✗ lines -- the flat list
-            # (confirmed from a live screenshot) was genuinely hard to scan: 8 same-weight lines in
-            # a column, no color on the check marks themselves. Same green/red tile-tint palette
-            # (#152a1e/#2a1515 bg) already used app-wide for Feed/Lottery/Catalysts cards, so this
-            # reads consistently instead of inventing a new look just for this one panel.
-            conf_tiles = "".join(
-                f'<div style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 0.6rem;'
-                f'background:{"#152a1e" if ok else "#2a1515"};border:1px solid '
-                f'{"#2c5a3c" if ok else "#5a2c2c"};border-radius:6px;">'
-                f'<span style="color:{"#79ed8e" if ok else "#ff8080"};font-weight:800;'
-                f'font-size:0.9rem;flex-shrink:0">{"✓" if ok else "✗"}</span>'
-                f'<span style="font-size:0.8rem;color:#e8ecec">{label}</span></div>'
-                for label, ok in confluence["checks"])
-            st.markdown(f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;'
-                       f'margin-bottom:0.9rem">{conf_tiles}</div>', unsafe_allow_html=True)
-            if dna["metrics"]:
-                st.markdown("**Market DNA metrics**")
-                # Same 2-column tile grid as Confluence detail just above -- neutral (⚪) tint since
-                # these are raw metric readouts, not pass/fail checks, so green/red would falsely
-                # imply a judgment call that isn't there. Was a flat `label: value` st.write loop,
-                # the same hard-to-scan format the user just flagged for Confluence.
-                dna_tiles = "".join(
-                    f'<div style="display:flex;justify-content:space-between;align-items:center;'
-                    f'gap:0.5rem;padding:0.4rem 0.6rem;background:#15191a;border:1px solid #232b2d;'
-                    f'border-radius:6px;" title="{glossary.help_for(_DNA_METRIC_LABELS.get(key, key)).replace(chr(34), chr(39))}">'
-                    f'<span style="font-size:0.78rem;color:#8b9a9d">{_DNA_METRIC_LABELS.get(key, key)}</span>'
-                    f'<span style="font-family:ui-monospace,Consolas,monospace;font-weight:700;'
-                    f'font-size:0.82rem;color:#e8ecec">{_dna_metric_display(key, val)}</span></div>'
-                    for key, val in dna["metrics"].items())
-                st.markdown(f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;'
-                           f'margin-bottom:0.9rem">{dna_tiles}</div>', unsafe_allow_html=True)
-            st.markdown("**📰 Catalyst Terminal**")
-            st.caption("General market news, deduplicated and scored — same for every index, "
-                      "not per-ticker.")
-            _render_catalyst_terminal()
-
-            # Signal Calibration Log status (PIIP audit 2026-08, Option C): every refresh's
-            # scores are now being logged locally (zdlog.log_signal_snapshot() above) -- this is
-            # collection status ONLY, not a backtest or win-rate claim. Same explicit deferral
-            # already used for Reddit Momentum's own log_snapshot(): a real validation/calibration
-            # view is honest once weeks/months of logged sessions exist, not before.
-            st.markdown("**📊 Signal Calibration Log**")
-            log_status = zdlog.collection_status(ticker)
-            if log_status["rows"]:
-                st.caption(f"Collecting since {log_status['first_date']} — {log_status['rows']:,} "
-                          f"{ticker} snapshots logged across {log_status['days']} day(s). This is "
-                          "collection only, NOT a backtest — there isn't enough history yet to "
-                          "validate any of this page's scores against real outcomes.")
-            else:
-                st.caption("No snapshots logged yet for this ticker — starts collecting on the "
-                          "next refresh.")
-
-            # State Timeline (PIIP audit 2026-08, Batch 3 / Phase 9): today's actual Day Regime
-            # transitions, edge-triggered-logged above -- reads back what really happened, never
-            # reconstructs history after the fact.
-            st.markdown("**🕰️ Today's Regime Timeline**")
-            timeline = zdlog.regime_timeline(ticker)
-            if timeline:
-                for t in timeline:
-                    ts_short = t["ts"].split("T")[-1] if "T" in t["ts"] else t["ts"].split(" ")[-1]
-                    reasons_bit = "; ".join(t["reasons"]) if t["reasons"] else ""
-                    st.write(f"**{ts_short}** {t['from_state'] or '—'} → {t['to_state']}"
-                            + (f"  \n_{reasons_bit}_" if reasons_bit else ""))
-            else:
-                st.caption("No regime changes logged yet today — the state has held steady since "
-                          "this page started tracking it, or this is the first read of the day.")
-
-            # Historical Regime Stats (PIIP audit 2026-08, Batch 3 / Phases 12-13): on-demand,
-            # NOT auto-computed every 30s refresh (this project's own performance rule -- separate
-            # live state from historical validation, see zero_dte.py module notes). Expect
-            # INSUFFICIENT SAMPLE almost everywhere right now -- collection only started
-            # 2026-08-15, that's correct honesty, not a bug to fix.
-            st.markdown("**📈 Historical Regime Stats**")
-            if st.button("Compute (reads the Signal Calibration Log, may take a moment)",
-                        key=f"zd_regime_stats_btn_{ticker}"):
-                st.session_state[f"zd_regime_stats_{ticker}"] = zdlog.regime_stats(ticker)
-            stats = st.session_state.get(f"zd_regime_stats_{ticker}")
-            if stats:
-                if not stats["groups"]:
-                    st.caption(stats["note"])
-                else:
-                    st.caption(f"{stats['total_snapshots']:,} total logged snapshots with a "
-                              f"recorded price. {stats['note']}")
-                    for state, horizons in stats["groups"].items():
-                        st.write(f"**{state}**")
-                        for h, s in horizons.items():
-                            if s["status"] == "INSUFFICIENT SAMPLE":
-                                st.caption(f"　{h}: INSUFFICIENT SAMPLE (N={s['n']}, "
-                                          f"need {s['min_needed']}+)")
-                            else:
-                                st.write(f"　{h}: N={s['n']} · {s['positive_rate_pct']:.0f}% positive "
-                                        f"· avg {s['avg_return_pct']:+.3f}% · median "
-                                        f"{s['median_return_pct']:+.3f}% · range "
-                                        f"[{s['worst_pct']:+.2f}%, {s['best_pct']:+.2f}%]")
-            else:
-                st.caption("Not computed yet this session — click the button above.")
-
-            # Data Quality panel (PIIP audit 2026-08, Batch 1 / Phase 22): consolidates the
-            # freshness/proxy caveats already scattered across this page's captions into one
-            # place, plus which timeframes actually have enough of today's session to compute yet.
-            st.markdown("**🔍 Data Quality**")
-            dq_color = "#79ed8e" if data_quality["underlying"] == "Fresh" else "#ff8080"
-            st.write(f":{'green' if data_quality['underlying']=='Fresh' else 'red'}[●] "
-                    f"Underlying: **{data_quality['underlying']}**" +
-                    (f" (last bar {data_quality['underlying_minutes_stale']:.0f} min old)"
-                     if data_quality["underlying_minutes_stale"] is not None else ""))
-            st.write(f":{'green' if data_quality['options_available'] else 'red'}[●] "
-                    f"Options: {data_quality['options_note']}")
-            tf_bits = " · ".join(f"{lbl} {'✓' if avail else '✗'}"
-                                 for lbl, avail in data_quality["timeframe_availability"].items())
-            st.caption(f"Timeframe availability: {tf_bits}")
-
-    with st.container(border=True):
-        st.markdown(f"**📊 Intraday Chart — {ticker}**")
-        _render_intraday_candlestick(ticker, intraday.get(ticker), key_prefix="zd")
-
-    st.caption("Tap any row to see the evidence behind its number.")
-
-    # Exit Quality needs real Python interactivity (checkbox + radio), which a static embedded
-    # component can't provide -- rendered as native widgets, right above the embedded list so it
-    # still reads as part of "Trade Readiness" even though it's a different building block.
-    with st.container(border=True):
-        ec1, ec2 = st.columns([1.6, 5])
-        ec1.markdown('<div style="font-size:0.85rem;font-weight:700;padding-top:0.3rem">🎯 Exit Quality</div>',
-                    unsafe_allow_html=True)
-        with ec2:
-            in_trade = st.checkbox("I'm in a trade", key=f"zd_intrade_{ticker}")
-            if in_trade:
-                direction = st.radio("Direction", ["CALL", "PUT"], horizontal=True, key=f"zd_dir_{ticker}")
-                eq = zd.exit_quality(direction, bias, momentum, breadth, snap)
-                for note in eq["notes"]:
-                    st.write(f"• {note}")
-
-                # Contract-specific quote (PIIP audit 2026-08, Option C): everything ABOVE this
-                # (Options Health, Dealer Positioning) is auto-picked ATM -- often not the strike
-                # someone actually holds. Snap the strike list to whichever side (calls/puts) the
-                # chosen Direction implies, default the picker to the ATM strike so it's a one-
-                # click confirm for the common case, but let it be overridden.
-                strikes = zd.available_strikes(chain, direction) if chain else []
-                if strikes:
-                    default_strike = (opt["atm_strike"] if opt and opt["atm_strike"] in strikes
-                                      else min(strikes, key=lambda s: abs(s - snap["last"])))
-                    picked_strike = st.selectbox(
-                        "Your contract's strike", strikes,
-                        index=strikes.index(default_strike),
-                        key=f"zd_strike_{ticker}_{direction}")
-                    cq = zd.contract_quote(chain, snap["last"], picked_strike, direction)
-                    if cq:
-                        cq_color = "#79ed8e" if cq["execution_quality"] > 60 else \
-                                   "#fabf6b" if cq["execution_quality"] > 40 else "#ff8080"
-                        delta_bit = f" · Δ {cq['delta']:.2f}" if cq["delta"] is not None else ""
-                        theta_bit = f" · θ/day {cq['theta_per_day']:.3f}" if cq["theta_per_day"] is not None else ""
-                        spread_bit = cq["spread_pct"] if cq["spread_pct"] is not None else "—"
-                        dte_bit = f" · {cq['dte_days']}DTE" if cq["dte_days"] is not None else ""
-                        money_bit = f" · {cq['moneyness_label']}" if cq["moneyness_label"] else ""
-                        if cq["last_trade_minutes"] is None:
-                            trade_bit = "no trades reported"
-                        elif cq["last_trade_minutes"] < 60:
-                            trade_bit = f"last traded {cq['last_trade_minutes']:.0f} min ago"
-                        else:
-                            trade_bit = f"last traded {cq['last_trade_minutes'] / 60:.1f}h ago"
-                        st.markdown(
-                            f'<div style="padding:0.5rem 0.7rem;background:#15191a;border:1px solid '
-                            f'#232b2d;border-radius:6px;margin-top:0.4rem">'
-                            f'<b>{ticker} {cq["matched_strike"]:.0f}{direction[0]}</b>{dte_bit}{money_bit} · '
-                            f'Bid ${cq["bid"]:.2f} / Ask ${cq["ask"]:.2f} · '
-                            f'<span style="color:{cq_color}">{cq["spread_label"]} spread '
-                            f'({spread_bit}%)</span> · '
-                            f'OI {cq["oi"]:,.0f} · Vol {cq["volume"]:,.0f}{delta_bit}{theta_bit}'
-                            f'<br><span style="font-size:0.78rem;color:#8b9a9d">{trade_bit}</span>'
-                            f'</div>', unsafe_allow_html=True)
-                        if cq["strike_snapped"]:
-                            st.caption(f"No exact {picked_strike:.0f} strike listed — showing the "
-                                      f"nearest one, {cq['matched_strike']:.0f}.")
-
-                        # Bid Simulator (PIIP audit 2026-08, Batch 1 / Phase 19): objective diff
-                        # math only, against the SAME quote already fetched above -- no new call,
-                        # no fill-probability claim (that needs historical fill data this project
-                        # doesn't have yet, see zero_dte_log.py's own collection-only stance).
-                        if cq["mid"]:
-                            hyp_bid = st.number_input(
-                                "Bid Simulator — hypothetical bid", min_value=0.0,
-                                value=round(cq["bid"], 2), step=0.01, format="%.2f",
-                                key=f"zd_bidsim_{ticker}_{direction}_{cq['matched_strike']}")
-                            vs_bid = hyp_bid - cq["bid"]
-                            vs_mid = hyp_bid - cq["mid"]
-                            vs_ask = hyp_bid - cq["ask"]
-                            pct_below_mid = (1 - hyp_bid / cq["mid"]) * 100 if cq["mid"] else None
-                            st.caption(
-                                f"vs current bid: {vs_bid:+.2f} · vs mid: {vs_mid:+.2f} "
-                                f"({pct_below_mid:+.1f}% below mid) · vs ask: {vs_ask:+.2f} · "
-                                f"**Fill probability: UNKNOWN** — not tracked yet, needs "
-                                "historical quote/fill data this project doesn't collect yet.")
-                else:
-                    st.caption("No listed options chain available for a contract-specific quote right now.")
-
-                # Edge-triggered alert: bias flipping against your direction is the "major change"
-                # signal -- toast + beep fire once on the refresh it first flips, the red banner
-                # stays up every refresh for as long as it's still flipped (never auto-exits you).
-                alert_key = f"zd_alert_{ticker}_{direction}"
-                was_alert = st.session_state.get(alert_key, False)
-                is_alert = not eq["trend_aligned"]
-                st.session_state[alert_key] = is_alert
-                if is_alert:
-                    _render_direction_alert(
-                        f"Bias has flipped against your {direction} — now {bias['environment']} "
-                        f"({bias['recommendation']}). Not an auto-exit signal — your call.")
-                    if not was_alert:
-                        st.toast(f"⚠️ {ticker} bias flipped against your {direction}", icon="🚨")
-                        st.markdown(f'<audio autoplay src="{_alert_beep_data_uri()}"></audio>',
-                                   unsafe_allow_html=True)
-            else:
-                st.caption("Flip on once in a trade — never an auto-exit signal.")
 
     sector_sorted = sorted(sector["sectors"].items(), key=lambda kv: kv[1]["score"], reverse=True)
     top_movers = sorted(mega["names"].items(), key=lambda kv: abs(kv[1]["day_change_pct"]), reverse=True)
@@ -3152,356 +2871,679 @@ def _render_zero_dte(ticker: str):
                          else ["This ticker has no listed options chain, or the chain fetch failed."])},
         ]},
     ]
-    _render_list_view(groups)
 
-    st.caption("Diverging view — every metric on one shared axis, sorted so the biggest leans surface first.")
-    momentum_val = momentum["continuation_score_pct"] if momentum else 50.0
-    opt_val = opt["execution_quality"] if opt else 50.0
-    breadth_val = (breadth["score_signed"] + 100) / 2
-    diverging_raw = [
-        ("Reversal Pressure", reversal["strength"]),
-        ("Entry Quality", entry["score"]),
-        ("Market Bias", bias["calls_pct"]),
-        ("Momentum", momentum_val),
-        (f"{ticker} Health", health["score"]),
-        ("Breadth (proxy)", breadth_val),
-        ("Sector Health", sector["overall_confirmation_pct"]),
-        ("Mega Cap Health", mega["score"]),
-        ("Options Health", opt_val),
-    ]
-    diverging_raw.sort(key=lambda kv: abs(kv[1] - 50), reverse=True)
-    diverging_rows = [{"label": label, "value": val, "display": f"{val:.0f}", "color": _score_color(val)}
-                      for label, val in diverging_raw]
-    footer_html = None
-    if dealer:
-        footer_html = (f"◆ Dealer Positioning: <b>{dealer['regime'].split(' (')[0]}</b> "
-                       f"— Net GEX ${dealer['net_gex_millions']:+,.0f}M (est.) — "
-                       f"volatility-regime flag, not a directional lean")
-    _render_diverging_chart(diverging_rows, footer_html)
+    # PIIP audit 2026-08 (readability pass): one helper so each tab below can pull just the
+    # groups it needs from the SAME `groups` list built above -- no duplicate list-building,
+    # just a different slice rendered in each tab.
+    def _pick(*label_prefixes):
+        return [g for g in groups if any(g["label"].startswith(p) for p in label_prefixes)]
 
-    # Macro Context, deliberately last on the page -- real (not approximated/estimated) yields/
-    # dollar/oil data from iip/macro.py (already existed, was never wired into any page before
-    # this) plus put/call OI ratio and an equal-weight-vs-cap-weight breadth check. Cached for 5min
-    # (not the page's usual 30s) because this is slower-moving day-regime context, not a 0DTE
-    # timing signal -- the same reason it's deprioritized to the bottom of the page.
-    #
-    # Same _render_list_view() rows as the Levels/Market Context groups above, NOT a plain
-    # st.metric row -- a first pass used st.metric and the user compared it directly against the
-    # zero_dte_new_sections.html mockup they'd approved: metrics alone lost the per-item
-    # description text and read far sparser/harder to scan than the labeled rows with context.
-    # container_key must differ from the main list-view's default ("zd_list_rows") -- it becomes
-    # both the CSS scope and every row's session_state key, so reusing it would collide.
-    mb = get_macro_batch()
-    rsp_spy = get_rsp_vs_spy()
+    tab_overview, tab_timeframes, tab_context, tab_options, tab_macro, tab_ai = st.tabs(
+        ["Overview", "Timeframes & Trend", "Market Context", "Options & Contract",
+         "Macro & Diagnostics", "AI Synthesis"])
 
-    def _last_close(df):
-        return float(df["Close"].iloc[-1]) if df is not None and not df.empty else None
+    with tab_overview:
+        # Day Regime (PIIP audit 2026-08, Batch 2 / Phase 1 + Phase 27): "what kind of day is this"
+        # answered FIRST, above Trade Confidence -- your own spec's own UI-priority mockup put this at
+        # the very top of the page, before any single-number score.
+        regime_colors = {"BULL CONFIRMED": "#79ed8e", "BULL DEVELOPING": "#a8e6a1",
+                         "BEAR CONFIRMED": "#ff8080", "BEAR DEVELOPING": "#f5a3a3",
+                         "NEUTRAL / CHOP": "#87d1ff", "TREND WEAKENING": "#fabf6b",
+                         "REGIME TRANSITION": "#fabf6b", "INSUFFICIENT DATA": "#8b9a9d"}
+        regime_color = regime_colors.get(regime["state"], "#8b9a9d")
+        st.markdown(f'<div style="padding:0.5rem 0.9rem;background:{regime_color}22;border:1.5px '
+                   f'solid {regime_color};border-radius:8px;margin-bottom:0.5rem;">'
+                   f'<span style="font-size:0.75rem;color:#8b9a9d;letter-spacing:0.05em">'
+                   f'DAY REGIME — {ticker}</span><br>'
+                   f'<span style="font-size:1.4rem;font-weight:800;color:{regime_color}">'
+                   f'{regime["state"]}</span>'
+                   f'{f" · {regime['trend_age_minutes']:.0f} min" if regime.get("trend_age_minutes") else ""}'
+                   f'</div>', unsafe_allow_html=True)
+        with st.expander("Why this regime?", expanded=False):
+            for r in regime["reasons"]:
+                st.write(f"• {r}")
+            st.caption("Synthesizes Trend State (iip/timeframe.py) + Trend Integrity — a reuse of "
+                      "signals already computed elsewhere on this page, not a new independent read. "
+                      "Thresholds (10 min / 50 integrity / 40 integrity / 60 reversal pressure) are a "
+                      "first-pass guess, flagged for calibration once real sessions accumulate in the "
+                      "Signal Calibration Log below.")
 
-    def _day_chg(df):
-        if df is None or len(df) < 2:
-            return None
-        return (float(df["Close"].iloc[-1]) / float(df["Close"].iloc[-2]) - 1) * 100
+        st.caption("**How the trend/direction reads relate:** Day Regime above is the headline "
+                  "synthesis. Trade Confidence (below) blends Market Bias + Entry Quality + "
+                  "liquidity into one directional-confidence number. Trend State, Timeframe "
+                  "Sequence, and Market Bias (Timeframes & Trend / Market Context tabs) are the "
+                  "more granular reads Day Regime is built from -- they usually agree; when they "
+                  "don't, that disagreement is itself the signal (see REGIME TRANSITION / TREND "
+                  "WEAKENING / NO CLEAR EDGE above).")
 
-    yield_10y = _last_close(mb.get(macro.YIELD_TICKERS["10Y"]))
-    dxy = _last_close(mb.get(macro.DXY_TICKER))
-    wti = _last_close(mb.get(macro.OIL_TICKERS["WTI"]))
-    rsp_chg = _day_chg(rsp_spy.get("RSP"))
-    spy_chg = _day_chg(rsp_spy.get("SPY"))
-    pcr_label = ("Slightly call-heavy" if put_call_ratio is not None and put_call_ratio < 0.9 else
-                "Slightly put-heavy" if put_call_ratio is not None and put_call_ratio > 1.1 else
-                "Balanced" if put_call_ratio is not None else None)
-
-    macro_groups = [{"label": "🌐 Macro Context", "rows": [
-        {"label": "10-Year Treasury Yield", "value": f"{yield_10y:.2f}%" if yield_10y is not None else "—",
-         "color": "#87d1ff",
-         "context": "Often moves SPY more than people realize, especially on CPI/Fed days",
-         "evidence": ["Real Treasury yield, not an estimate (^TNX)",
-                     "Slower-moving than everything above — day-regime context, not a timing signal."]},
-        {"label": "Dollar Index (DXY)", "value": f"{dxy:.2f}" if dxy is not None else "—",
-         "color": "#87d1ff",
-         "context": "Strong dollar historically a headwind for large-cap earnings / SPY",
-         "evidence": ["ICE Dollar Index (DX-Y.NYB) — real data, not an estimate."]},
-        {"label": "WTI Crude Oil", "value": f"${wti:.2f}" if wti is not None else "—",
-         "color": "#87d1ff",
-         "context": "Context for Energy-sector-driven moves in the sector rotation panel above",
-         "evidence": ["WTI front-month futures (CL=F) — real data, not an estimate."]},
-        {"label": "Put/Call OI Ratio",
-         "value": f"{put_call_ratio:.2f}" if put_call_ratio is not None else "—",
-         "color": ("#79ed8e" if pcr_label == "Slightly call-heavy" else
-                  "#ff8080" if pcr_label == "Slightly put-heavy" else "#87d1ff"),
-         "context": "From the same options chain already fetched for GEX above — no new network call",
-         "evidence": ([f"{pcr_label} ({put_call_ratio:.2f})",
-                      "Sentiment context, noisier than Dealer Positioning above — not a strong "
-                      "signal on its own."] if put_call_ratio is not None
-                     else ["No listed options chain available right now."])},
-        {"label": "Equal-Weight vs Cap-Weight",
-         "value": (f"RSP {rsp_chg:+.2f}%<br>SPY {spy_chg:+.2f}%"
-                  if rsp_chg is not None and spy_chg is not None else "—"),
-         "color": ("#79ed8e" if (rsp_chg is not None and rsp_chg >= (spy_chg or 0)) else "#ff8080")
-                  if rsp_chg is not None and spy_chg is not None else "#8b9a9d",
-         "context": "RSP vs SPY today — is the whole market moving, or just mega-caps?",
-         "evidence": (["RSP = equal-weight S&P 500 ETF, SPY = cap-weight.",
-                      "RSP lagging SPY means the move is concentrated in a handful of mega-caps, "
-                      "not broad participation."] if rsp_chg is not None else ["Not enough data right now."])},
-    ]}]
-
-    # Fed liquidity + real economic releases -- both fetched via macro.py's free, keyless FRED CSV
-    # export (same pattern already used above for nothing until now: liquidity_snapshot() and
-    # yield_curve_snapshot() were fully built in iip/macro.py but never actually called from any
-    # page). Its own group, not folded into "Macro Context" above -- that group is real-time-ish
-    # market proxies (yields/DXY/oil), this is monthly/quarterly-cadence Fed & economic data, a
-    # genuinely different update rhythm that deserves its own clearly-labeled section.
-    yc = macro.yield_curve_snapshot(mb)
-    liq = get_liquidity_snapshot()
-    econ = get_econ_releases()
-
-    def _liq_row(label, key, unit=""):
-        d = liq.get(key)
-        if not d:
-            return {"label": label, "value": "—", "color": "#8b9a9d",
-                   "context": "FRED data unavailable right now.", "evidence": ["No data returned."]}
-        chg = d.get("chg_1w")
-        return {"label": label, "value": f"{d['latest']:,.0f}{unit}",
-               "color": "#79ed8e" if (chg or 0) >= 0 else "#ff8080",
-               "context": f"{chg:+,.0f}{unit} vs a week ago" if chg is not None else f"As of {d['as_of']}",
-               "evidence": [f"As of {d['as_of']}", "Source: FRED (Federal Reserve Bank of St. Louis), "
-                           "free public CSV export, no API key."]}
-
-    econ_rows = []
-    cpi = econ.get("CPI")
-    econ_rows.append({
-        "label": "CPI (YoY)", "value": f"{cpi['yoy_pct']:+.2f}%" if cpi and cpi.get("yoy_pct") is not None else "—",
-        "color": "#87d1ff", "context": f"As of {cpi['as_of']}" if cpi else "FRED data unavailable right now.",
-        "evidence": ["Headline CPI, seasonally adjusted (FRED series CPIAUCSL).",
-                    "Real monthly release, not an estimate — updates once a month."] if cpi else ["No data returned."]})
-    unemp = econ.get("Unemployment Rate")
-    econ_rows.append({
-        "label": "Unemployment Rate", "value": f"{unemp['latest']:.1f}%" if unemp else "—",
-        "color": "#87d1ff", "context": f"As of {unemp['as_of']}" if unemp else "FRED data unavailable right now.",
-        "evidence": ["FRED series UNRATE — real monthly release, not an estimate."] if unemp else ["No data returned."]})
-    payrolls = econ.get("Nonfarm Payrolls")
-    pr_chg = payrolls.get("mom_change_thousands") if payrolls else None
-    econ_rows.append({
-        "label": "Nonfarm Payrolls (MoM)", "value": f"{pr_chg:+,.0f}K jobs" if pr_chg is not None else "—",
-        "color": "#79ed8e" if (pr_chg or 0) >= 0 else "#ff8080",
-        "context": f"As of {payrolls['as_of']}" if payrolls else "FRED data unavailable right now.",
-        "evidence": ["Change in total nonfarm employment vs the prior month (FRED series PAYEMS) — "
-                    "the actual 'jobs added' headline number."] if payrolls else ["No data returned."]})
-
-    fed_groups = [{"label": "🏦 Fed Liquidity & Economic Data", "rows": [
-        {"label": "Yield Curve (13W–10Y)",
-         "value": f"{yc['spread_13w_10y']:+.2f}pp" if yc.get("spread_13w_10y") is not None else "—",
-         "color": "#ff8080" if (yc.get("spread_13w_10y") or 0) < 0 else "#87d1ff",
-         "context": "Negative (inverted) has historically preceded recessions, with a long and variable lag",
-         "evidence": ["10Y minus 13-week yield — the classic 2s10s spread isn't buildable here "
-                     "(no free 2Y yield series exists), this is the closest free equivalent.",
-                     "A single day's reading is noisy — the trend over weeks matters more than any one print."]},
-        _liq_row("Treasury General Account", "TGA", "M"),
-        _liq_row("Reverse Repo Usage", "RRP", "B"),
-        _liq_row("Bank Reserves", "bank_reserves", "M"),
-        *econ_rows,
-    ]}]
-    _render_list_view(macro_groups, container_key="zd_macro_rows")
-    _render_list_view(fed_groups, container_key="zd_fed_rows")
-
-    with st.container(border=True):
-        st.subheader("🤖 5-agent AI synthesis (optional, real spend)")
-        if not os.getenv("ANTHROPIC_API_KEY"):
-            _ai_key_missing_notice()
-        else:
-            st.caption("5 weighted Claude Haiku calls (News & Catalyst 30% · Technical & Market "
-                      "Structure 25% · Options & Positioning 20% · Macro & Cross-Asset 15% · "
-                      "Skeptic/Risk 10%), each scoring the signals above from its own focus area. "
-                      "The final blend below is CODE-computed from those scores, never invented by "
-                      "any single call. Same backtest caveat as Trade Confidence: this is a "
-                      "descriptive lean, not a trade recommendation. Real spend, ~$0.03–0.05/run "
-                      "(5 calls), governed by a $3/day · $0.15/run · 5-call cap.")
-            ai_0dte_key = f"ai_0dte_{ticker}"
-            zd_question = st.text_input(
-                "Anything specific you want the agents to consider? (optional)",
-                key=f"ai_0dte_q_{ticker}",
-                placeholder="e.g. Does this change if I'm only looking at the next hour?")
-            if st.button("🤖 Run 5-agent synthesis", key=f"ai_0dte_btn_{ticker}"):
-                with st.spinner("Running 5 Claude calls…"):
-                    try:
-                        # Explicit timing context -- without this, an agent scoring "Bullish 82"
-                        # can't tell 9:35am (6.5 hours left) from 3:50pm (10 minutes left), even
-                        # though time-to-expiration is arguably THE defining variable for a 0DTE
-                        # decision (theta/gamma both accelerate hard into the close). Computed here,
-                        # never invented by the model.
-                        now_et = datetime.now(ZoneInfo("America/New_York"))
-                        mkt_open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-                        mkt_close_et = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
-                        in_session = mkt_open_et <= now_et <= mkt_close_et
-                        # Expiry note is now conditional on the ACTUAL fetched chain (PIIP audit
-                        # 2026-08, Batch 3: NVDA is selectable here too and doesn't list same-day
-                        # expiries the way the index ETFs do) -- never assume 0DTE just because
-                        # this is the "0DTE Intelligence" page.
-                        chain_expires_today = bool(chain) and chain.get("expiry") == date.today().isoformat()
-                        if in_session and chain_expires_today:
-                            expiry_note = "These options expire at TODAY's market close (~16:00 ET)."
-                        elif in_session and chain:
-                            expiry_note = (f"Nearest listed expiry is {chain['expiry']} — NOT 0DTE "
-                                          f"for {ticker} today.")
-                        elif in_session:
-                            expiry_note = "No listed options chain available right now."
-                        else:
-                            expiry_note = ("Outside regular market hours (9:30-16:00 ET) -- signals "
-                                          "may reflect the last completed session, not a live one.")
-                        session_timing = {
-                            "current_time_et": now_et.strftime("%H:%M:%S"),
-                            "session_minutes_elapsed": dna.get("metrics", {}).get("session_minutes"),
-                            "minutes_until_close": (round((mkt_close_et - now_et).total_seconds() / 60)
-                                                    if in_session else None),
-                            "note": expiry_note,
-                        }
-                        signals = {
-                            "ticker": ticker,
-                            "session_timing": session_timing,
-                            "trade_confidence": confidence["score"],
-                            "bias_direction": confidence["bias_direction"],
-                            "market_dna": dna["label"],
-                            "market_bias": {"recommendation": bias["recommendation"],
-                                           "confidence_pct": bias["confidence_pct"],
-                                           "environment": bias["environment"]},
-                            "breadth": {"score_signed": breadth["score_signed"], "label": breadth["label"]},
-                            "sector_health_pct": sector["overall_confirmation_pct"],
-                            "mega_cap_health": mega["score"],
-                            "nvda_relative_strength": ({"label": nvda_rs["label"],
-                                                        "spread_pct": nvda_rs["spread_pct"],
-                                                        "acceleration": nvda_rs_accel["trend"]
-                                                        if nvda_rs_accel else None}
-                                                       if nvda_rs else None),
-                            "momentum": ({"continuation_score_pct":
-                                         momentum["continuation_score_pct"]} if momentum else None),
-                            "reversal_pressure_score": reversal["reversal_pressure_score"],
-                            "trend_integrity": {"score": integrity["score"], "label": integrity["label"]},
-                            "vwap_crossings": crossings["count"] if crossings else None,
-                            "day_regime": regime["state"],
-                            "timeframe_sequence": tf_sequence["interpretation"],
-                            "timeframe_alignment": ({"aligned_direction": alignment["aligned_direction"],
-                                                     "agree": alignment["agree"], "total": alignment["total"]}
-                                                    if alignment["total"] else None),
-                            "trend_state": trend_state["state"],
-                            "entry_quality": entry["score"],
-                            "confluence": f"{confluence['agree']}/{confluence['total']}",
-                            "options_health": opt["execution_quality"] if opt else None,
-                            "dealer_positioning": dealer["regime"] if dealer else None,
-                            "macro": {"10y_yield": yield_10y, "dxy": dxy, "wti": wti,
-                                     "put_call_oi_ratio": put_call_ratio,
-                                     "rsp_vs_spy": {"rsp_chg": rsp_chg, "spy_chg": spy_chg}},
-                        }
-                        client = agents.LLMClient(budget=agents.Budget(max_calls_per_run=5), dry_run=False)
-                        out, cost = agents.zero_dte_agent_synthesis(
-                            signals, client, user_question=zd_question.strip() or None)
-                        st.session_state[ai_0dte_key] = {"out": out, "cost": cost,
-                                                         "question": zd_question.strip() or None}
-                        st.toast(f"5-agent synthesis done — ${cost:.4f} spent.")
-                    except Exception as e:
-                        st.error(f"AI call failed: {e}")
-            zd_cached = st.session_state.get(ai_0dte_key)
-            if zd_cached:
-                o = zd_cached["out"]
-                fscore, fconf = o["final_score"], o["final_confidence"]
-                # Lean/strategy/watch-level are CODE-computed from the blended score + already-
-                # fetched real levels (VWAP) -- never invented by the LLM, same "AI interprets,
-                # code computes" rule as everywhere else. Descriptive framing (Lean / "if
-                # considering" / Watch level), not "Suggested Trade" -- this page says elsewhere it
-                # never recommends a trade, and the backtest shows no proven edge to act on.
-                if fscore > 15:
-                    lean, lean_color = "Bullish", "#79ed8e"
-                    strategy = "If considering a directional structure: ATM/near-the-money calls (illustrative only, not a recommendation)."
-                    watch = f"VWAP reclaim/hold above ${snap['vwap']:.2f}"
-                elif fscore < -15:
-                    lean, lean_color = "Bearish", "#ff8080"
-                    strategy = "If considering a directional structure: ATM/near-the-money puts (illustrative only, not a recommendation)."
-                    watch = f"VWAP breakdown/hold below ${snap['vwap']:.2f}"
-                else:
-                    lean, lean_color = "Neutral", "#87d1ff"
-                    strategy = "No clear directional edge — no illustrative structure shown."
-                    watch = f"Watching VWAP (${snap['vwap']:.2f}) for a decisive break either way."
-
-                st.caption(f"Last run cost **${zd_cached['cost']:.4f}** · based on the signals at "
-                          "the moment you clicked — click again for a fresh read.")
-                fc1, fc2 = st.columns([2, 3])
-                with fc1:
-                    st.markdown(f'<div style="font-size:2.2rem;font-weight:800;color:{lean_color};'
-                               f'line-height:1.1">{fscore:+.0f} &nbsp; <span style="font-size:1.3rem">'
-                               f'{lean}</span></div>', unsafe_allow_html=True)
-                    st.caption(f"Final {ticker} Score · Confidence {fconf:.0f}%")
-                with fc2:
-                    st.markdown(f"**Lean:** {lean}  \n**If considering a strategy:** {strategy}  \n"
-                              f"**Watch level:** {watch}")
-
-                # Debate framing: every agent's key evidence pooled into "case FOR"/"case AGAINST"
-                # by its own recommended_bias, each line tagged with its source agent -- not a
-                # second scoreboard, since the hero block above already shows the final score/
-                # lean/watch level and repeating those at the bottom read as unexplained duplicate
-                # info (confirmed live against a mockup). Neutral-biased agents sit out of the
-                # debate entirely -- a "no side taken" call has no evidence for either column.
-                for_items = [(name, e) for name, a in o["agents"].items()
-                            if a["recommended_bias"] == "Bullish" for e in a.get("key_evidence", [])]
-                against_items = [(name, e) for name, a in o["agents"].items()
-                                 if a["recommended_bias"] == "Bearish" for e in a.get("key_evidence", [])]
-
-                def _debate_col_html(title, dot, items, bg, border):
-                    rows = "".join(
-                        f'<div style="font-size:0.83rem;margin-bottom:0.5rem;padding-left:0.9rem;'
-                        f'border-left:2px solid #2a3a3c">{_esc(e)}'
-                        f'<span style="font-family:ui-monospace,Consolas,monospace;font-size:0.68rem;'
-                        f'color:#8b9a9d;display:block;margin-top:0.1rem">— {_esc(name)}</span></div>'
-                        for name, e in items) or (
-                        '<div style="font-size:0.82rem;color:#8b9a9d">No agent landed here this run.</div>')
-                    return (f'<div style="background:{bg};border:1px solid {border};border-radius:8px;'
-                           f'padding:0.8rem 1rem">'
-                           f'<div style="font-weight:700;margin-bottom:0.5rem;display:flex;'
-                           f'justify-content:space-between">'
-                           f'<span>{dot} {title}</span><span>{len(items)} point{"s" if len(items) != 1 else ""}</span>'
-                           f'</div>{rows}</div>')
-
-                dcol1, dcol2 = st.columns(2)
-                with dcol1:
-                    st.markdown(_debate_col_html("The case FOR", "🟢", for_items,
-                                                 "#101d15", "#2c5a3c"), unsafe_allow_html=True)
-                with dcol2:
-                    st.markdown(_debate_col_html("The case AGAINST", "🔴", against_items,
-                                                 "#1d1212", "#5a2c2c"), unsafe_allow_html=True)
-
-                # Neutral agents contribute nothing to either column above (correctly -- a "no
-                # side taken" call has no evidence for a debate), but silently dropping them made
-                # a run where most agents declined to guess (stale/pre-market data, etc.) look like
-                # only 1 of 5 agents had responded at all (confirmed live -- a real "why does the
-                # FOR column say 0" confusion, not an actual computation bug). Naming them here
-                # makes clear all 5 calls ran.
-                neutral_names = [name for name, a in o["agents"].items()
-                                 if a["recommended_bias"] == "Neutral"]
-                if neutral_names:
-                    st.caption(f"⚪ No strong lean this run: {', '.join(neutral_names)} "
-                              f"({len(neutral_names)} of 5 agents didn't take a side).")
-
-                # Direct answers to the user's own question, one per agent that actually returned
-                # one -- shown LAST, after all the other agent context above, not first. Showing
-                # each agent's own answer (not a single blended one) is deliberate -- they can
-                # reasonably disagree, and that disagreement is itself useful, not noise to average away.
-                if zd_cached.get("question"):
-                    answers = [(name, a["user_question_answer"]) for name, a in o["agents"].items()
-                              if a.get("user_question_answer")]
-                    if answers:
-                        q_tile = _tile_style("🔵")
-                        rows = "".join(
-                            f'<div style="margin-bottom:0.5rem"><span style="font-family:ui-monospace,'
-                            f'Consolas,monospace;font-size:0.68rem;color:#8b9a9d">{_esc(name)}</span><br>'
-                            f'{_esc(ans)}</div>' for name, ans in answers)
-                        st.markdown(
-                            f'<div style="background:{q_tile["bg"]};border:1px solid {q_tile["border"]};'
-                            f'border-radius:10px;padding:0.9rem 1.1rem;margin-top:0.9rem">'
-                            f'<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;'
-                            f'color:{_TEXT_BY_EMOJI["🔵"]};font-weight:700;margin-bottom:0.5rem">'
-                            f'❓ Your question: "{_esc(zd_cached["question"])}"</div>{rows}</div>',
+        # ── Hero: the one number worth seeing without scrolling ──
+        conf_color = _score_color(confidence["score"])
+        with st.container(border=True):
+            hc1, hc2 = st.columns([3, 2])
+            with hc1:
+                st.caption(f"{ticker} · TRADE CONFIDENCE")
+                st.markdown(f'<div style="font-size:2.6rem;font-weight:800;color:{conf_color};'
+                            f'line-height:1.1">{confidence["score"]:.0f}/100 &nbsp; '
+                            f'<span style="font-size:1.6rem">{confidence["bias_direction"]}</span></div>',
                             unsafe_allow_html=True)
+                dna_line = "Insufficient evidence" if dna["label"] == "Insufficient Evidence" else dna["label"]
+                st.caption(f"Market DNA: **{dna_line}** — {dna['note']}")
+                st.caption("⚠️ Backtested Jul 2023–2026 (546 days, reusing this exact scoring code): "
+                          "even the highest-confidence bucket hit ~57% next-day directional accuracy — "
+                          "statistically indistinguishable from SPY's own 57.3% base rate over the same "
+                          "period. This score has not been shown to beat the market's baseline. Treat it "
+                          "as an internal-agreement heuristic, not a track record.")
+                # NO CLEAR EDGE (PIIP audit 2026-08, Batch 1 / Phase 21): a first-class, EXPLAINED
+                # outcome -- only renders when Market Bias itself has no real lean, and only shows
+                # reasons already computed elsewhere on the page, never a new judgment.
+                if no_edge_reasons:
+                    reasons_html = "".join(f"<li>{_esc(r)}</li>" for r in no_edge_reasons)
+                    st.markdown(f'<div style="margin-top:0.6rem;padding:0.6rem 0.8rem;background:'
+                               f'#2a2415;border:1px solid #5a4c2c;border-radius:6px;">'
+                               f'<b style="color:#fabf6b">⚠️ NO CLEAR EDGE</b>'
+                               f'<ul style="margin:0.3rem 0 0 1.1rem;padding:0;font-size:0.85rem;'
+                               f'color:#e8ecec">{reasons_html}</ul></div>', unsafe_allow_html=True)
+            with hc2:
+                # Confluence: how many independent signals actually agree with the bias's own lean --
+                # market_bias() already counts this internally to build its own confidence number, but
+                # never showed the count itself. One glanceable line here (the "quick look" the user
+                # asked for); the full itemized ✓/✗ breakdown lives in the expander below, not here,
+                # so the hero stays a fast read instead of turning into an 8-line checklist.
+                conf_ratio = confluence["agree"] / confluence["total"] if confluence["total"] else 0.0
+                confluence_color = "#79ed8e" if conf_ratio >= 0.7 else "#fabf6b" if conf_ratio >= 0.4 else "#ff8080"
+                st.markdown(f'<div style="font-weight:700;margin-bottom:0.3rem">'
+                            f'Confluence: <span style="color:{confluence_color}">'
+                            f'{confluence["agree"]}/{confluence["total"]} signals agree</span></div>',
+                            unsafe_allow_html=True)
+                for mark, label in confidence["checks"]:
+                    st.write(f"{mark} {label}")
+            with st.expander("Confluence breakdown"):
+                st.markdown(f"**Confluence detail — {confluence['lean_label']} lean**")
+                # Colored 2-column tile grid, not a flat list of plain-text ✓/✗ lines -- the flat list
+                # (confirmed from a live screenshot) was genuinely hard to scan: 8 same-weight lines in
+                # a column, no color on the check marks themselves. Same green/red tile-tint palette
+                # (#152a1e/#2a1515 bg) already used app-wide for Feed/Lottery/Catalysts cards, so this
+                # reads consistently instead of inventing a new look just for this one panel.
+                conf_tiles = "".join(
+                    f'<div style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 0.6rem;'
+                    f'background:{"#152a1e" if ok else "#2a1515"};border:1px solid '
+                    f'{"#2c5a3c" if ok else "#5a2c2c"};border-radius:6px;">'
+                    f'<span style="color:{"#79ed8e" if ok else "#ff8080"};font-weight:800;'
+                    f'font-size:0.9rem;flex-shrink:0">{"✓" if ok else "✗"}</span>'
+                    f'<span style="font-size:0.8rem;color:#e8ecec">{label}</span></div>'
+                    for label, ok in confluence["checks"])
+                st.markdown(f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;'
+                           f'margin-bottom:0.9rem">{conf_tiles}</div>', unsafe_allow_html=True)
+
+        with st.container(border=True):
+            st.markdown(f"**📊 Intraday Chart — {ticker}**")
+            _render_intraday_candlestick(ticker, intraday.get(ticker), key_prefix="zd")
+
+
+        st.caption("Tap any row to see the evidence behind its number.")
+
+        _render_list_view(_pick("🎯 Trade Readiness"), container_key="zd_overview_rows")
+
+    with tab_timeframes:
+        _render_list_view(_pick("🧭 Trend Integrity", "🕰️ Multi-Timeframe Alignment",
+                                "📈 Price & Momentum"),
+                          container_key="zd_tf_rows")
+
+        st.caption("Diverging view — every metric on one shared axis, sorted so the biggest leans surface first.")
+        momentum_val = momentum["continuation_score_pct"] if momentum else 50.0
+        opt_val = opt["execution_quality"] if opt else 50.0
+        breadth_val = (breadth["score_signed"] + 100) / 2
+        diverging_raw = [
+            ("Reversal Pressure", reversal["strength"]),
+            ("Entry Quality", entry["score"]),
+            ("Market Bias", bias["calls_pct"]),
+            ("Momentum", momentum_val),
+            (f"{ticker} Health", health["score"]),
+            ("Breadth (proxy)", breadth_val),
+            ("Sector Health", sector["overall_confirmation_pct"]),
+            ("Mega Cap Health", mega["score"]),
+            ("Options Health", opt_val),
+        ]
+        diverging_raw.sort(key=lambda kv: abs(kv[1] - 50), reverse=True)
+        diverging_rows = [{"label": label, "value": val, "display": f"{val:.0f}", "color": _score_color(val)}
+                          for label, val in diverging_raw]
+        footer_html = None
+        if dealer:
+            footer_html = (f"◆ Dealer Positioning: <b>{dealer['regime'].split(' (')[0]}</b> "
+                           f"— Net GEX ${dealer['net_gex_millions']:+,.0f}M (est.) — "
+                           f"volatility-regime flag, not a directional lean")
+        _render_diverging_chart(diverging_rows, footer_html)
+
+
+    with tab_context:
+        _render_list_view(_pick("🌐 Market Context", "📐 Levels"),
+                          container_key="zd_context_rows")
+
+    with tab_options:
+        _render_list_view(_pick("⚙️ Options & Dealer"), container_key="zd_options_rows")
+
+        # Exit Quality needs real Python interactivity (checkbox + radio), which a static embedded
+        # component can't provide -- rendered as native widgets, right above the embedded list so it
+        # still reads as part of "Trade Readiness" even though it's a different building block.
+        with st.container(border=True):
+            ec1, ec2 = st.columns([1.6, 5])
+            ec1.markdown('<div style="font-size:0.85rem;font-weight:700;padding-top:0.3rem">🎯 Exit Quality</div>',
+                        unsafe_allow_html=True)
+            with ec2:
+                in_trade = st.checkbox("I'm in a trade", key=f"zd_intrade_{ticker}")
+                if in_trade:
+                    direction = st.radio("Direction", ["CALL", "PUT"], horizontal=True, key=f"zd_dir_{ticker}")
+                    eq = zd.exit_quality(direction, bias, momentum, breadth, snap)
+                    for note in eq["notes"]:
+                        st.write(f"• {note}")
+
+                    # Contract-specific quote (PIIP audit 2026-08, Option C): everything ABOVE this
+                    # (Options Health, Dealer Positioning) is auto-picked ATM -- often not the strike
+                    # someone actually holds. Snap the strike list to whichever side (calls/puts) the
+                    # chosen Direction implies, default the picker to the ATM strike so it's a one-
+                    # click confirm for the common case, but let it be overridden.
+                    strikes = zd.available_strikes(chain, direction) if chain else []
+                    if strikes:
+                        default_strike = (opt["atm_strike"] if opt and opt["atm_strike"] in strikes
+                                          else min(strikes, key=lambda s: abs(s - snap["last"])))
+                        picked_strike = st.selectbox(
+                            "Your contract's strike", strikes,
+                            index=strikes.index(default_strike),
+                            key=f"zd_strike_{ticker}_{direction}")
+                        cq = zd.contract_quote(chain, snap["last"], picked_strike, direction)
+                        if cq:
+                            cq_color = "#79ed8e" if cq["execution_quality"] > 60 else \
+                                       "#fabf6b" if cq["execution_quality"] > 40 else "#ff8080"
+                            delta_bit = f" · Δ {cq['delta']:.2f}" if cq["delta"] is not None else ""
+                            theta_bit = f" · θ/day {cq['theta_per_day']:.3f}" if cq["theta_per_day"] is not None else ""
+                            spread_bit = cq["spread_pct"] if cq["spread_pct"] is not None else "—"
+                            dte_bit = f" · {cq['dte_days']}DTE" if cq["dte_days"] is not None else ""
+                            money_bit = f" · {cq['moneyness_label']}" if cq["moneyness_label"] else ""
+                            if cq["last_trade_minutes"] is None:
+                                trade_bit = "no trades reported"
+                            elif cq["last_trade_minutes"] < 60:
+                                trade_bit = f"last traded {cq['last_trade_minutes']:.0f} min ago"
+                            else:
+                                trade_bit = f"last traded {cq['last_trade_minutes'] / 60:.1f}h ago"
+                            st.markdown(
+                                f'<div style="padding:0.5rem 0.7rem;background:#15191a;border:1px solid '
+                                f'#232b2d;border-radius:6px;margin-top:0.4rem">'
+                                f'<b>{ticker} {cq["matched_strike"]:.0f}{direction[0]}</b>{dte_bit}{money_bit} · '
+                                f'Bid ${cq["bid"]:.2f} / Ask ${cq["ask"]:.2f} · '
+                                f'<span style="color:{cq_color}">{cq["spread_label"]} spread '
+                                f'({spread_bit}%)</span> · '
+                                f'OI {cq["oi"]:,.0f} · Vol {cq["volume"]:,.0f}{delta_bit}{theta_bit}'
+                                f'<br><span style="font-size:0.78rem;color:#8b9a9d">{trade_bit}</span>'
+                                f'</div>', unsafe_allow_html=True)
+                            if cq["strike_snapped"]:
+                                st.caption(f"No exact {picked_strike:.0f} strike listed — showing the "
+                                          f"nearest one, {cq['matched_strike']:.0f}.")
+
+                            # Bid Simulator (PIIP audit 2026-08, Batch 1 / Phase 19): objective diff
+                            # math only, against the SAME quote already fetched above -- no new call,
+                            # no fill-probability claim (that needs historical fill data this project
+                            # doesn't have yet, see zero_dte_log.py's own collection-only stance).
+                            if cq["mid"]:
+                                hyp_bid = st.number_input(
+                                    "Bid Simulator — hypothetical bid", min_value=0.0,
+                                    value=round(cq["bid"], 2), step=0.01, format="%.2f",
+                                    key=f"zd_bidsim_{ticker}_{direction}_{cq['matched_strike']}")
+                                vs_bid = hyp_bid - cq["bid"]
+                                vs_mid = hyp_bid - cq["mid"]
+                                vs_ask = hyp_bid - cq["ask"]
+                                pct_below_mid = (1 - hyp_bid / cq["mid"]) * 100 if cq["mid"] else None
+                                st.caption(
+                                    f"vs current bid: {vs_bid:+.2f} · vs mid: {vs_mid:+.2f} "
+                                    f"({pct_below_mid:+.1f}% below mid) · vs ask: {vs_ask:+.2f} · "
+                                    f"**Fill probability: UNKNOWN** — not tracked yet, needs "
+                                    "historical quote/fill data this project doesn't collect yet.")
                     else:
-                        st.caption("⚠️ None of the 5 agents returned a direct answer to your "
-                                  "question this run — try rephrasing it or click again.")
+                        st.caption("No listed options chain available for a contract-specific quote right now.")
+
+                    # Edge-triggered alert: bias flipping against your direction is the "major change"
+                    # signal -- toast + beep fire once on the refresh it first flips, the red banner
+                    # stays up every refresh for as long as it's still flipped (never auto-exits you).
+                    alert_key = f"zd_alert_{ticker}_{direction}"
+                    was_alert = st.session_state.get(alert_key, False)
+                    is_alert = not eq["trend_aligned"]
+                    st.session_state[alert_key] = is_alert
+                    if is_alert:
+                        _render_direction_alert(
+                            f"Bias has flipped against your {direction} — now {bias['environment']} "
+                            f"({bias['recommendation']}). Not an auto-exit signal — your call.")
+                        if not was_alert:
+                            st.toast(f"⚠️ {ticker} bias flipped against your {direction}", icon="🚨")
+                            st.markdown(f'<audio autoplay src="{_alert_beep_data_uri()}"></audio>',
+                                       unsafe_allow_html=True)
+                else:
+                    st.caption("Flip on once in a trade — never an auto-exit signal.")
+
+
+    with tab_macro:
+        with st.expander("Market DNA metrics, Catalyst Terminal, Signal Calibration Log, "
+                         "Regime Timeline, Historical Stats, and Data Quality"):
+                if dna["metrics"]:
+                    st.markdown("**Market DNA metrics**")
+                    # Same 2-column tile grid as Confluence detail just above -- neutral (⚪) tint since
+                    # these are raw metric readouts, not pass/fail checks, so green/red would falsely
+                    # imply a judgment call that isn't there. Was a flat `label: value` st.write loop,
+                    # the same hard-to-scan format the user just flagged for Confluence.
+                    dna_tiles = "".join(
+                        f'<div style="display:flex;justify-content:space-between;align-items:center;'
+                        f'gap:0.5rem;padding:0.4rem 0.6rem;background:#15191a;border:1px solid #232b2d;'
+                        f'border-radius:6px;" title="{glossary.help_for(_DNA_METRIC_LABELS.get(key, key)).replace(chr(34), chr(39))}">'
+                        f'<span style="font-size:0.78rem;color:#8b9a9d">{_DNA_METRIC_LABELS.get(key, key)}</span>'
+                        f'<span style="font-family:ui-monospace,Consolas,monospace;font-weight:700;'
+                        f'font-size:0.82rem;color:#e8ecec">{_dna_metric_display(key, val)}</span></div>'
+                        for key, val in dna["metrics"].items())
+                    st.markdown(f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;'
+                               f'margin-bottom:0.9rem">{dna_tiles}</div>', unsafe_allow_html=True)
+                st.markdown("**📰 Catalyst Terminal**")
+                st.caption("General market news, deduplicated and scored — same for every index, "
+                          "not per-ticker.")
+                _render_catalyst_terminal()
+
+                # Signal Calibration Log status (PIIP audit 2026-08, Option C): every refresh's
+                # scores are now being logged locally (zdlog.log_signal_snapshot() above) -- this is
+                # collection status ONLY, not a backtest or win-rate claim. Same explicit deferral
+                # already used for Reddit Momentum's own log_snapshot(): a real validation/calibration
+                # view is honest once weeks/months of logged sessions exist, not before.
+                st.markdown("**📊 Signal Calibration Log**")
+                log_status = zdlog.collection_status(ticker)
+                if log_status["rows"]:
+                    st.caption(f"Collecting since {log_status['first_date']} — {log_status['rows']:,} "
+                              f"{ticker} snapshots logged across {log_status['days']} day(s). This is "
+                              "collection only, NOT a backtest — there isn't enough history yet to "
+                              "validate any of this page's scores against real outcomes.")
+                else:
+                    st.caption("No snapshots logged yet for this ticker — starts collecting on the "
+                              "next refresh.")
+
+                # State Timeline (PIIP audit 2026-08, Batch 3 / Phase 9): today's actual Day Regime
+                # transitions, edge-triggered-logged above -- reads back what really happened, never
+                # reconstructs history after the fact.
+                st.markdown("**🕰️ Today's Regime Timeline**")
+                timeline = zdlog.regime_timeline(ticker)
+                if timeline:
+                    for t in timeline:
+                        ts_short = t["ts"].split("T")[-1] if "T" in t["ts"] else t["ts"].split(" ")[-1]
+                        reasons_bit = "; ".join(t["reasons"]) if t["reasons"] else ""
+                        st.write(f"**{ts_short}** {t['from_state'] or '—'} → {t['to_state']}"
+                                + (f"  \n_{reasons_bit}_" if reasons_bit else ""))
+                else:
+                    st.caption("No regime changes logged yet today — the state has held steady since "
+                              "this page started tracking it, or this is the first read of the day.")
+
+                # Historical Regime Stats (PIIP audit 2026-08, Batch 3 / Phases 12-13): on-demand,
+                # NOT auto-computed every 30s refresh (this project's own performance rule -- separate
+                # live state from historical validation, see zero_dte.py module notes). Expect
+                # INSUFFICIENT SAMPLE almost everywhere right now -- collection only started
+                # 2026-08-15, that's correct honesty, not a bug to fix.
+                st.markdown("**📈 Historical Regime Stats**")
+                if st.button("Compute (reads the Signal Calibration Log, may take a moment)",
+                            key=f"zd_regime_stats_btn_{ticker}"):
+                    st.session_state[f"zd_regime_stats_{ticker}"] = zdlog.regime_stats(ticker)
+                stats = st.session_state.get(f"zd_regime_stats_{ticker}")
+                if stats:
+                    if not stats["groups"]:
+                        st.caption(stats["note"])
+                    else:
+                        st.caption(f"{stats['total_snapshots']:,} total logged snapshots with a "
+                                  f"recorded price. {stats['note']}")
+                        for state, horizons in stats["groups"].items():
+                            st.write(f"**{state}**")
+                            for h, s in horizons.items():
+                                if s["status"] == "INSUFFICIENT SAMPLE":
+                                    st.caption(f"　{h}: INSUFFICIENT SAMPLE (N={s['n']}, "
+                                              f"need {s['min_needed']}+)")
+                                else:
+                                    st.write(f"　{h}: N={s['n']} · {s['positive_rate_pct']:.0f}% positive "
+                                            f"· avg {s['avg_return_pct']:+.3f}% · median "
+                                            f"{s['median_return_pct']:+.3f}% · range "
+                                            f"[{s['worst_pct']:+.2f}%, {s['best_pct']:+.2f}%]")
+                else:
+                    st.caption("Not computed yet this session — click the button above.")
+
+                # Data Quality panel (PIIP audit 2026-08, Batch 1 / Phase 22): consolidates the
+                # freshness/proxy caveats already scattered across this page's captions into one
+                # place, plus which timeframes actually have enough of today's session to compute yet.
+                st.markdown("**🔍 Data Quality**")
+                dq_color = "#79ed8e" if data_quality["underlying"] == "Fresh" else "#ff8080"
+                st.write(f":{'green' if data_quality['underlying']=='Fresh' else 'red'}[●] "
+                        f"Underlying: **{data_quality['underlying']}**" +
+                        (f" (last bar {data_quality['underlying_minutes_stale']:.0f} min old)"
+                         if data_quality["underlying_minutes_stale"] is not None else ""))
+                st.write(f":{'green' if data_quality['options_available'] else 'red'}[●] "
+                        f"Options: {data_quality['options_note']}")
+                tf_bits = " · ".join(f"{lbl} {'✓' if avail else '✗'}"
+                                     for lbl, avail in data_quality["timeframe_availability"].items())
+                st.caption(f"Timeframe availability: {tf_bits}")
+
+        # Macro Context, deliberately last on the page -- real (not approximated/estimated) yields/
+        # dollar/oil data from iip/macro.py (already existed, was never wired into any page before
+        # this) plus put/call OI ratio and an equal-weight-vs-cap-weight breadth check. Cached for 5min
+        # (not the page's usual 30s) because this is slower-moving day-regime context, not a 0DTE
+        # timing signal -- the same reason it's deprioritized to the bottom of the page.
+        #
+        # Same _render_list_view() rows as the Levels/Market Context groups above, NOT a plain
+        # st.metric row -- a first pass used st.metric and the user compared it directly against the
+        # zero_dte_new_sections.html mockup they'd approved: metrics alone lost the per-item
+        # description text and read far sparser/harder to scan than the labeled rows with context.
+        # container_key must differ from the main list-view's default ("zd_list_rows") -- it becomes
+        # both the CSS scope and every row's session_state key, so reusing it would collide.
+        mb = get_macro_batch()
+        rsp_spy = get_rsp_vs_spy()
+
+        def _last_close(df):
+            return float(df["Close"].iloc[-1]) if df is not None and not df.empty else None
+
+        def _day_chg(df):
+            if df is None or len(df) < 2:
+                return None
+            return (float(df["Close"].iloc[-1]) / float(df["Close"].iloc[-2]) - 1) * 100
+
+        yield_10y = _last_close(mb.get(macro.YIELD_TICKERS["10Y"]))
+        dxy = _last_close(mb.get(macro.DXY_TICKER))
+        wti = _last_close(mb.get(macro.OIL_TICKERS["WTI"]))
+        rsp_chg = _day_chg(rsp_spy.get("RSP"))
+        spy_chg = _day_chg(rsp_spy.get("SPY"))
+        pcr_label = ("Slightly call-heavy" if put_call_ratio is not None and put_call_ratio < 0.9 else
+                    "Slightly put-heavy" if put_call_ratio is not None and put_call_ratio > 1.1 else
+                    "Balanced" if put_call_ratio is not None else None)
+
+        macro_groups = [{"label": "🌐 Macro Context", "rows": [
+            {"label": "10-Year Treasury Yield", "value": f"{yield_10y:.2f}%" if yield_10y is not None else "—",
+             "color": "#87d1ff",
+             "context": "Often moves SPY more than people realize, especially on CPI/Fed days",
+             "evidence": ["Real Treasury yield, not an estimate (^TNX)",
+                         "Slower-moving than everything above — day-regime context, not a timing signal."]},
+            {"label": "Dollar Index (DXY)", "value": f"{dxy:.2f}" if dxy is not None else "—",
+             "color": "#87d1ff",
+             "context": "Strong dollar historically a headwind for large-cap earnings / SPY",
+             "evidence": ["ICE Dollar Index (DX-Y.NYB) — real data, not an estimate."]},
+            {"label": "WTI Crude Oil", "value": f"${wti:.2f}" if wti is not None else "—",
+             "color": "#87d1ff",
+             "context": "Context for Energy-sector-driven moves in the sector rotation panel above",
+             "evidence": ["WTI front-month futures (CL=F) — real data, not an estimate."]},
+            {"label": "Put/Call OI Ratio",
+             "value": f"{put_call_ratio:.2f}" if put_call_ratio is not None else "—",
+             "color": ("#79ed8e" if pcr_label == "Slightly call-heavy" else
+                      "#ff8080" if pcr_label == "Slightly put-heavy" else "#87d1ff"),
+             "context": "From the same options chain already fetched for GEX above — no new network call",
+             "evidence": ([f"{pcr_label} ({put_call_ratio:.2f})",
+                          "Sentiment context, noisier than Dealer Positioning above — not a strong "
+                          "signal on its own."] if put_call_ratio is not None
+                         else ["No listed options chain available right now."])},
+            {"label": "Equal-Weight vs Cap-Weight",
+             "value": (f"RSP {rsp_chg:+.2f}%<br>SPY {spy_chg:+.2f}%"
+                      if rsp_chg is not None and spy_chg is not None else "—"),
+             "color": ("#79ed8e" if (rsp_chg is not None and rsp_chg >= (spy_chg or 0)) else "#ff8080")
+                      if rsp_chg is not None and spy_chg is not None else "#8b9a9d",
+             "context": "RSP vs SPY today — is the whole market moving, or just mega-caps?",
+             "evidence": (["RSP = equal-weight S&P 500 ETF, SPY = cap-weight.",
+                          "RSP lagging SPY means the move is concentrated in a handful of mega-caps, "
+                          "not broad participation."] if rsp_chg is not None else ["Not enough data right now."])},
+        ]}]
+
+        # Fed liquidity + real economic releases -- both fetched via macro.py's free, keyless FRED CSV
+        # export (same pattern already used above for nothing until now: liquidity_snapshot() and
+        # yield_curve_snapshot() were fully built in iip/macro.py but never actually called from any
+        # page). Its own group, not folded into "Macro Context" above -- that group is real-time-ish
+        # market proxies (yields/DXY/oil), this is monthly/quarterly-cadence Fed & economic data, a
+        # genuinely different update rhythm that deserves its own clearly-labeled section.
+        yc = macro.yield_curve_snapshot(mb)
+        liq = get_liquidity_snapshot()
+        econ = get_econ_releases()
+
+        def _liq_row(label, key, unit=""):
+            d = liq.get(key)
+            if not d:
+                return {"label": label, "value": "—", "color": "#8b9a9d",
+                       "context": "FRED data unavailable right now.", "evidence": ["No data returned."]}
+            chg = d.get("chg_1w")
+            return {"label": label, "value": f"{d['latest']:,.0f}{unit}",
+                   "color": "#79ed8e" if (chg or 0) >= 0 else "#ff8080",
+                   "context": f"{chg:+,.0f}{unit} vs a week ago" if chg is not None else f"As of {d['as_of']}",
+                   "evidence": [f"As of {d['as_of']}", "Source: FRED (Federal Reserve Bank of St. Louis), "
+                               "free public CSV export, no API key."]}
+
+        econ_rows = []
+        cpi = econ.get("CPI")
+        econ_rows.append({
+            "label": "CPI (YoY)", "value": f"{cpi['yoy_pct']:+.2f}%" if cpi and cpi.get("yoy_pct") is not None else "—",
+            "color": "#87d1ff", "context": f"As of {cpi['as_of']}" if cpi else "FRED data unavailable right now.",
+            "evidence": ["Headline CPI, seasonally adjusted (FRED series CPIAUCSL).",
+                        "Real monthly release, not an estimate — updates once a month."] if cpi else ["No data returned."]})
+        unemp = econ.get("Unemployment Rate")
+        econ_rows.append({
+            "label": "Unemployment Rate", "value": f"{unemp['latest']:.1f}%" if unemp else "—",
+            "color": "#87d1ff", "context": f"As of {unemp['as_of']}" if unemp else "FRED data unavailable right now.",
+            "evidence": ["FRED series UNRATE — real monthly release, not an estimate."] if unemp else ["No data returned."]})
+        payrolls = econ.get("Nonfarm Payrolls")
+        pr_chg = payrolls.get("mom_change_thousands") if payrolls else None
+        econ_rows.append({
+            "label": "Nonfarm Payrolls (MoM)", "value": f"{pr_chg:+,.0f}K jobs" if pr_chg is not None else "—",
+            "color": "#79ed8e" if (pr_chg or 0) >= 0 else "#ff8080",
+            "context": f"As of {payrolls['as_of']}" if payrolls else "FRED data unavailable right now.",
+            "evidence": ["Change in total nonfarm employment vs the prior month (FRED series PAYEMS) — "
+                        "the actual 'jobs added' headline number."] if payrolls else ["No data returned."]})
+
+        fed_groups = [{"label": "🏦 Fed Liquidity & Economic Data", "rows": [
+            {"label": "Yield Curve (13W–10Y)",
+             "value": f"{yc['spread_13w_10y']:+.2f}pp" if yc.get("spread_13w_10y") is not None else "—",
+             "color": "#ff8080" if (yc.get("spread_13w_10y") or 0) < 0 else "#87d1ff",
+             "context": "Negative (inverted) has historically preceded recessions, with a long and variable lag",
+             "evidence": ["10Y minus 13-week yield — the classic 2s10s spread isn't buildable here "
+                         "(no free 2Y yield series exists), this is the closest free equivalent.",
+                         "A single day's reading is noisy — the trend over weeks matters more than any one print."]},
+            _liq_row("Treasury General Account", "TGA", "M"),
+            _liq_row("Reverse Repo Usage", "RRP", "B"),
+            _liq_row("Bank Reserves", "bank_reserves", "M"),
+            *econ_rows,
+        ]}]
+        _render_list_view(macro_groups, container_key="zd_macro_rows")
+        _render_list_view(fed_groups, container_key="zd_fed_rows")
+
+
+    with tab_ai:
+        with st.container(border=True):
+            st.subheader("🤖 5-agent AI synthesis (optional, real spend)")
+            if not os.getenv("ANTHROPIC_API_KEY"):
+                _ai_key_missing_notice()
+            else:
+                st.caption("5 weighted Claude Haiku calls (News & Catalyst 30% · Technical & Market "
+                          "Structure 25% · Options & Positioning 20% · Macro & Cross-Asset 15% · "
+                          "Skeptic/Risk 10%), each scoring the signals above from its own focus area. "
+                          "The final blend below is CODE-computed from those scores, never invented by "
+                          "any single call. Same backtest caveat as Trade Confidence: this is a "
+                          "descriptive lean, not a trade recommendation. Real spend, ~$0.03–0.05/run "
+                          "(5 calls), governed by a $3/day · $0.15/run · 5-call cap.")
+                ai_0dte_key = f"ai_0dte_{ticker}"
+                zd_question = st.text_input(
+                    "Anything specific you want the agents to consider? (optional)",
+                    key=f"ai_0dte_q_{ticker}",
+                    placeholder="e.g. Does this change if I'm only looking at the next hour?")
+                if st.button("🤖 Run 5-agent synthesis", key=f"ai_0dte_btn_{ticker}"):
+                    with st.spinner("Running 5 Claude calls…"):
+                        try:
+                            # Explicit timing context -- without this, an agent scoring "Bullish 82"
+                            # can't tell 9:35am (6.5 hours left) from 3:50pm (10 minutes left), even
+                            # though time-to-expiration is arguably THE defining variable for a 0DTE
+                            # decision (theta/gamma both accelerate hard into the close). Computed here,
+                            # never invented by the model.
+                            now_et = datetime.now(ZoneInfo("America/New_York"))
+                            mkt_open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+                            mkt_close_et = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+                            in_session = mkt_open_et <= now_et <= mkt_close_et
+                            # Expiry note is now conditional on the ACTUAL fetched chain (PIIP audit
+                            # 2026-08, Batch 3: NVDA is selectable here too and doesn't list same-day
+                            # expiries the way the index ETFs do) -- never assume 0DTE just because
+                            # this is the "0DTE Intelligence" page.
+                            chain_expires_today = bool(chain) and chain.get("expiry") == date.today().isoformat()
+                            if in_session and chain_expires_today:
+                                expiry_note = "These options expire at TODAY's market close (~16:00 ET)."
+                            elif in_session and chain:
+                                expiry_note = (f"Nearest listed expiry is {chain['expiry']} — NOT 0DTE "
+                                              f"for {ticker} today.")
+                            elif in_session:
+                                expiry_note = "No listed options chain available right now."
+                            else:
+                                expiry_note = ("Outside regular market hours (9:30-16:00 ET) -- signals "
+                                              "may reflect the last completed session, not a live one.")
+                            session_timing = {
+                                "current_time_et": now_et.strftime("%H:%M:%S"),
+                                "session_minutes_elapsed": dna.get("metrics", {}).get("session_minutes"),
+                                "minutes_until_close": (round((mkt_close_et - now_et).total_seconds() / 60)
+                                                        if in_session else None),
+                                "note": expiry_note,
+                            }
+                            signals = {
+                                "ticker": ticker,
+                                "session_timing": session_timing,
+                                "trade_confidence": confidence["score"],
+                                "bias_direction": confidence["bias_direction"],
+                                "market_dna": dna["label"],
+                                "market_bias": {"recommendation": bias["recommendation"],
+                                               "confidence_pct": bias["confidence_pct"],
+                                               "environment": bias["environment"]},
+                                "breadth": {"score_signed": breadth["score_signed"], "label": breadth["label"]},
+                                "sector_health_pct": sector["overall_confirmation_pct"],
+                                "mega_cap_health": mega["score"],
+                                "nvda_relative_strength": ({"label": nvda_rs["label"],
+                                                            "spread_pct": nvda_rs["spread_pct"],
+                                                            "acceleration": nvda_rs_accel["trend"]
+                                                            if nvda_rs_accel else None}
+                                                           if nvda_rs else None),
+                                "momentum": ({"continuation_score_pct":
+                                             momentum["continuation_score_pct"]} if momentum else None),
+                                "reversal_pressure_score": reversal["reversal_pressure_score"],
+                                "trend_integrity": {"score": integrity["score"], "label": integrity["label"]},
+                                "vwap_crossings": crossings["count"] if crossings else None,
+                                "day_regime": regime["state"],
+                                "timeframe_sequence": tf_sequence["interpretation"],
+                                "timeframe_alignment": ({"aligned_direction": alignment["aligned_direction"],
+                                                         "agree": alignment["agree"], "total": alignment["total"]}
+                                                        if alignment["total"] else None),
+                                "trend_state": trend_state["state"],
+                                "entry_quality": entry["score"],
+                                "confluence": f"{confluence['agree']}/{confluence['total']}",
+                                "options_health": opt["execution_quality"] if opt else None,
+                                "dealer_positioning": dealer["regime"] if dealer else None,
+                                "macro": {"10y_yield": yield_10y, "dxy": dxy, "wti": wti,
+                                         "put_call_oi_ratio": put_call_ratio,
+                                         "rsp_vs_spy": {"rsp_chg": rsp_chg, "spy_chg": spy_chg}},
+                            }
+                            client = agents.LLMClient(budget=agents.Budget(max_calls_per_run=5), dry_run=False)
+                            out, cost = agents.zero_dte_agent_synthesis(
+                                signals, client, user_question=zd_question.strip() or None)
+                            st.session_state[ai_0dte_key] = {"out": out, "cost": cost,
+                                                             "question": zd_question.strip() or None}
+                            st.toast(f"5-agent synthesis done — ${cost:.4f} spent.")
+                        except Exception as e:
+                            st.error(f"AI call failed: {e}")
+                zd_cached = st.session_state.get(ai_0dte_key)
+                if zd_cached:
+                    o = zd_cached["out"]
+                    fscore, fconf = o["final_score"], o["final_confidence"]
+                    # Lean/strategy/watch-level are CODE-computed from the blended score + already-
+                    # fetched real levels (VWAP) -- never invented by the LLM, same "AI interprets,
+                    # code computes" rule as everywhere else. Descriptive framing (Lean / "if
+                    # considering" / Watch level), not "Suggested Trade" -- this page says elsewhere it
+                    # never recommends a trade, and the backtest shows no proven edge to act on.
+                    if fscore > 15:
+                        lean, lean_color = "Bullish", "#79ed8e"
+                        strategy = "If considering a directional structure: ATM/near-the-money calls (illustrative only, not a recommendation)."
+                        watch = f"VWAP reclaim/hold above ${snap['vwap']:.2f}"
+                    elif fscore < -15:
+                        lean, lean_color = "Bearish", "#ff8080"
+                        strategy = "If considering a directional structure: ATM/near-the-money puts (illustrative only, not a recommendation)."
+                        watch = f"VWAP breakdown/hold below ${snap['vwap']:.2f}"
+                    else:
+                        lean, lean_color = "Neutral", "#87d1ff"
+                        strategy = "No clear directional edge — no illustrative structure shown."
+                        watch = f"Watching VWAP (${snap['vwap']:.2f}) for a decisive break either way."
+
+                    st.caption(f"Last run cost **${zd_cached['cost']:.4f}** · based on the signals at "
+                              "the moment you clicked — click again for a fresh read.")
+                    fc1, fc2 = st.columns([2, 3])
+                    with fc1:
+                        st.markdown(f'<div style="font-size:2.2rem;font-weight:800;color:{lean_color};'
+                                   f'line-height:1.1">{fscore:+.0f} &nbsp; <span style="font-size:1.3rem">'
+                                   f'{lean}</span></div>', unsafe_allow_html=True)
+                        st.caption(f"Final {ticker} Score · Confidence {fconf:.0f}%")
+                    with fc2:
+                        st.markdown(f"**Lean:** {lean}  \n**If considering a strategy:** {strategy}  \n"
+                                  f"**Watch level:** {watch}")
+
+                    # Debate framing: every agent's key evidence pooled into "case FOR"/"case AGAINST"
+                    # by its own recommended_bias, each line tagged with its source agent -- not a
+                    # second scoreboard, since the hero block above already shows the final score/
+                    # lean/watch level and repeating those at the bottom read as unexplained duplicate
+                    # info (confirmed live against a mockup). Neutral-biased agents sit out of the
+                    # debate entirely -- a "no side taken" call has no evidence for either column.
+                    for_items = [(name, e) for name, a in o["agents"].items()
+                                if a["recommended_bias"] == "Bullish" for e in a.get("key_evidence", [])]
+                    against_items = [(name, e) for name, a in o["agents"].items()
+                                     if a["recommended_bias"] == "Bearish" for e in a.get("key_evidence", [])]
+
+                    def _debate_col_html(title, dot, items, bg, border):
+                        rows = "".join(
+                            f'<div style="font-size:0.83rem;margin-bottom:0.5rem;padding-left:0.9rem;'
+                            f'border-left:2px solid #2a3a3c">{_esc(e)}'
+                            f'<span style="font-family:ui-monospace,Consolas,monospace;font-size:0.68rem;'
+                            f'color:#8b9a9d;display:block;margin-top:0.1rem">— {_esc(name)}</span></div>'
+                            for name, e in items) or (
+                            '<div style="font-size:0.82rem;color:#8b9a9d">No agent landed here this run.</div>')
+                        return (f'<div style="background:{bg};border:1px solid {border};border-radius:8px;'
+                               f'padding:0.8rem 1rem">'
+                               f'<div style="font-weight:700;margin-bottom:0.5rem;display:flex;'
+                               f'justify-content:space-between">'
+                               f'<span>{dot} {title}</span><span>{len(items)} point{"s" if len(items) != 1 else ""}</span>'
+                               f'</div>{rows}</div>')
+
+                    dcol1, dcol2 = st.columns(2)
+                    with dcol1:
+                        st.markdown(_debate_col_html("The case FOR", "🟢", for_items,
+                                                     "#101d15", "#2c5a3c"), unsafe_allow_html=True)
+                    with dcol2:
+                        st.markdown(_debate_col_html("The case AGAINST", "🔴", against_items,
+                                                     "#1d1212", "#5a2c2c"), unsafe_allow_html=True)
+
+                    # Neutral agents contribute nothing to either column above (correctly -- a "no
+                    # side taken" call has no evidence for a debate), but silently dropping them made
+                    # a run where most agents declined to guess (stale/pre-market data, etc.) look like
+                    # only 1 of 5 agents had responded at all (confirmed live -- a real "why does the
+                    # FOR column say 0" confusion, not an actual computation bug). Naming them here
+                    # makes clear all 5 calls ran.
+                    neutral_names = [name for name, a in o["agents"].items()
+                                     if a["recommended_bias"] == "Neutral"]
+                    if neutral_names:
+                        st.caption(f"⚪ No strong lean this run: {', '.join(neutral_names)} "
+                                  f"({len(neutral_names)} of 5 agents didn't take a side).")
+
+                    # Direct answers to the user's own question, one per agent that actually returned
+                    # one -- shown LAST, after all the other agent context above, not first. Showing
+                    # each agent's own answer (not a single blended one) is deliberate -- they can
+                    # reasonably disagree, and that disagreement is itself useful, not noise to average away.
+                    if zd_cached.get("question"):
+                        answers = [(name, a["user_question_answer"]) for name, a in o["agents"].items()
+                                  if a.get("user_question_answer")]
+                        if answers:
+                            q_tile = _tile_style("🔵")
+                            rows = "".join(
+                                f'<div style="margin-bottom:0.5rem"><span style="font-family:ui-monospace,'
+                                f'Consolas,monospace;font-size:0.68rem;color:#8b9a9d">{_esc(name)}</span><br>'
+                                f'{_esc(ans)}</div>' for name, ans in answers)
+                            st.markdown(
+                                f'<div style="background:{q_tile["bg"]};border:1px solid {q_tile["border"]};'
+                                f'border-radius:10px;padding:0.9rem 1.1rem;margin-top:0.9rem">'
+                                f'<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;'
+                                f'color:{_TEXT_BY_EMOJI["🔵"]};font-weight:700;margin-bottom:0.5rem">'
+                                f'❓ Your question: "{_esc(zd_cached["question"])}"</div>{rows}</div>',
+                                unsafe_allow_html=True)
+                        else:
+                            st.caption("⚠️ None of the 5 agents returned a direct answer to your "
+                                      "question this run — try rephrasing it or click again.")
 
 
 if nav == "0DTE Intelligence":
