@@ -424,6 +424,34 @@ FAVICON = Path(__file__).parent / "assets" / "favicon.png"   # absolute path —
 # Python dependency, not a runtime fetch.
 LIGHTWEIGHT_CHARTS_JS = Path(__file__).parent / "assets" / "vendor" / "lightweight-charts.standalone.production.js"
 
+
+@st.cache_resource(show_spinner=False)
+def _load_lightweight_charts_js() -> str:
+    """Read the vendored library once per server process -- it's a static ~200KB file that never
+    changes at runtime, cache_resource (not cache_data) since this is a big constant string with
+    no TTL/per-arg cache key needed.
+
+    PIIP audit 2026-08: defined here, right after the LIGHTWEIGHT_CHARTS_JS constant, NOT down by
+    whichever chart function needed it first -- a real bug this session: Streamlit scripts execute
+    top-to-bottom as a flat script, `if nav == "X":` blocks run immediately as they're reached, so
+    a helper called from an EARLIER page (Home) needs to already be defined before that page's
+    block runs, not merely before the module finishes loading. Every chart-rendering function on
+    every page shares this one definition."""
+    return LIGHTWEIGHT_CHARTS_JS.read_text(encoding="utf-8")
+
+
+def _et_seconds(ts) -> int:
+    """PIIP audit 2026-08: Lightweight Charts renders numeric `time` values as UTC and displays
+    them as-is -- no per-viewer timezone conversion. Reinterpreting the ET wall-clock numbers AS
+    IF they were UTC (strip tz, treat the naive value as UTC) makes the chart display the correct
+    ET hour:minute regardless of the viewer's own browser timezone, which is what matters here
+    since market hours are inherently ET-based, not the viewer's locale. Only needed for INTRADAY
+    (sub-daily) series -- daily-bar charts use a plain {year, month, day} time object instead,
+    which has no timezone ambiguity to correct for."""
+    naive = ts.tz_localize(None) if ts.tzinfo is not None else ts
+    return int(naive.replace(tzinfo=timezone.utc).timestamp())
+
+
 # "owner/repo" the in-app Feedback page opens pre-filled GitHub issues against. Update this once
 # the repo is actually pushed -- placeholder until then.
 GITHUB_REPO = "jacksonp-dev/PIIP"
@@ -1666,35 +1694,47 @@ def _render_equity_chart(curve: list[dict]):
                    "end-of-day-so-far point, not a live intraday curve. **1W or wider is the "
                    "honest view right now.**")
     if len(shown) >= 2:
-        # TradingView-style (chosen from the equity_chart_options.html comparison, "Option B"):
-        # price axis on the right (their convention, not the left like a generic analytics chart),
-        # a dashed rule + floating tag pinned at the current value, colored by net direction over
-        # the SHOWN window -- same green/red palette and "auto" semantics as the Watchlist/Screener
-        # sparklines. Needs Altair (st.line_chart can't do a right-side axis or a floating tag);
-        # Altair ships with Streamlit already, no new dependency.
+        # PIIP audit 2026-08: rebuilt on TradingView's Lightweight Charts (see
+        # LIGHTWEIGHT_CHARTS_JS / _load_lightweight_charts_js(), first used for the 0DTE intraday
+        # chart) instead of Altair. This chart was ALREADY hand-building a TradingView look
+        # (right-axis price scale, dashed rule + floating tag pinned at the last value) out of 4
+        # layered Altair marks -- lastValueVisible + priceLineVisible are native, built-in
+        # features of the actual TradingView library, so this is a straightforward, better-
+        # fitting swap, not just consistency for its own sake. Colored by net direction over the
+        # SHOWN window, same green/red semantics as the Watchlist/Screener sparklines (those stay
+        # Altair -- tiny inline table-cell charts, a full JS chart per row isn't a good trade).
         color = "#79ed8e" if shown[-1]["equity"] >= shown[0]["equity"] else "#ff8080"
-        cdf = pd.DataFrame({"Date": [date.fromisoformat(p["date"]) for p in shown],
-                            "Equity": [p["equity"] for p in shown]})
-        last_date, last_val = cdf["Date"].iloc[-1], cdf["Equity"].iloc[-1]
-        span_days = max((last_date - cdf["Date"].iloc[0]).days, 1)
-        domain_end = last_date + timedelta(days=max(1, round(span_days * 0.08)))
-
-        x_scale = alt.Scale(domain=[cdf["Date"].iloc[0], domain_end])
-        line = alt.Chart(cdf).mark_line(strokeWidth=2.5, color=color).encode(
-            x=alt.X("Date:T", title=None, scale=x_scale),
-            y=alt.Y("Equity:Q", title=None, axis=alt.Axis(orient="right"), scale=alt.Scale(zero=False)),
-            tooltip=[alt.Tooltip("Date:T"), alt.Tooltip("Equity:Q", format="$,.2f", title="Equity")])
-        end_dot = alt.Chart(pd.DataFrame({"x": [last_date], "y": [last_val]})).mark_circle(
-            size=55, color=color).encode(x=alt.X("x:T", scale=x_scale), y="y:Q")
-        last_rule = alt.Chart(pd.DataFrame({"y": [last_val]})).mark_rule(
-            strokeDash=[3, 3], color=color, opacity=0.55, strokeWidth=1).encode(y="y:Q")
-        last_tag = alt.Chart(pd.DataFrame({"x": [domain_end], "y": [last_val],
-                                          "label": [f"${last_val:,.2f}"]})).mark_text(
-            align="right", dx=-4, fontWeight="bold", fontSize=12, color=color
-        ).encode(x=alt.X("x:T", scale=x_scale), y="y:Q", text="label:N")
-
-        chart = (line + last_rule + end_dot + last_tag).properties(height=280)
-        st.altair_chart(chart, width="stretch")
+        points = [{"time": {"year": int(p["date"][:4]), "month": int(p["date"][5:7]),
+                            "day": int(p["date"][8:10])}, "value": round(float(p["equity"]), 2)}
+                 for p in shown]
+        chart_id = f"home_equity_{rng}".replace(" ", "_")
+        payload = json.dumps({"points": points, "color": color})
+        html = f"""
+<div id="{chart_id}" style="width:100%;height:280px;"></div>
+<script>{_load_lightweight_charts_js()}</script>
+<script>
+(function() {{
+  const data = {payload};
+  const container = document.getElementById("{chart_id}");
+  const chart = LightweightCharts.createChart(container, {{
+    autoSize: true,
+    layout: {{ background: {{ type: "solid", color: "transparent" }}, textColor: "#8b9a9d" }},
+    grid: {{ vertLines: {{ color: "#1c2426" }}, horzLines: {{ color: "#1c2426" }} }},
+    rightPriceScale: {{ borderColor: "#232b2d" }},
+    timeScale: {{ borderColor: "#232b2d" }},
+    crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
+  }});
+  const series = chart.addSeries(LightweightCharts.LineSeries, {{
+    color: data.color, lineWidth: 2,
+    lastValueVisible: true, priceLineVisible: true, priceLineStyle: 2,
+    priceFormat: {{ type: "price", precision: 2, minMove: 0.01 }},
+  }});
+  series.setData(data.points);
+  chart.timeScale().fitContent();
+}})();
+</script>
+"""
+        st.iframe(html, height=290)
     else:
         st.caption(f"Only one data point in the {rng} window — try a wider range.")
     st.caption("Historical points before daily snapshot-logging began are reconstructed from "
@@ -2464,24 +2504,6 @@ def _dna_metric_display(key: str, val) -> str:
     if key == "session_minutes":
         return f"{val:.0f} min"
     return str(val)
-
-
-@st.cache_resource(show_spinner=False)
-def _load_lightweight_charts_js() -> str:
-    """Read the vendored library once per server process -- it's a static ~200KB file that never
-    changes at runtime, cache_resource (not cache_data) since this is a big constant string with
-    no TTL/per-arg cache key needed."""
-    return LIGHTWEIGHT_CHARTS_JS.read_text(encoding="utf-8")
-
-
-def _et_seconds(ts) -> int:
-    """PIIP audit 2026-08: Lightweight Charts renders numeric `time` values as UTC and displays
-    them as-is -- no per-viewer timezone conversion. Reinterpreting the ET wall-clock numbers AS
-    IF they were UTC (strip tz, treat the naive value as UTC) makes the chart display the correct
-    ET hour:minute regardless of the viewer's own browser timezone, which is what matters here
-    since market hours are inherently ET-based, not the viewer's locale."""
-    naive = ts.tz_localize(None) if ts.tzinfo is not None else ts
-    return int(naive.replace(tzinfo=timezone.utc).timestamp())
 
 
 def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
