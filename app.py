@@ -2496,9 +2496,16 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
                  alt.Tooltip("Close:Q", format="$.2f")])
     vwap_line = base.mark_line(color="#87d1ff", strokeWidth=1.5, strokeDash=[3, 2]).encode(
         y=alt.Y("VWAP:Q"), tooltip=[alt.Tooltip("VWAP:Q", format="$.2f")])
-    st.altair_chart((wick + body + vwap_line).properties(height=340), width="stretch")
+    # Scroll-to-zoom / drag-to-pan (PIIP audit 2026-08, per user request for Robinhood-style chart
+    # interaction) -- Altair/Vega-Lite's built-in .interactive(), no new charting library. Zooms
+    # both axes together rather than auto-rescaling price to the visible time range the way a real
+    # trading terminal does (that needs a much more involved reactive-selection setup) -- still a
+    # real improvement over a static chart, and honestly labeled as scroll/drag, not a full redo.
+    chart = (wick + body + vwap_line).properties(height=340).interactive(
+        name=f"{key_prefix}_zoom_{ticker}_{tf_choice}")
+    st.altair_chart(chart, width="stretch")
     st.caption(f"{tf_choice} candles · {len(cdf)} bars · dashed line is the running VWAP · "
-              "refreshes every 30s with the rest of this page.")
+              "scroll/pinch to zoom, drag to pan · refreshes every 30s with the rest of this page.")
 
 
 @st.fragment(run_every=30)
