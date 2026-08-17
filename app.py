@@ -1981,11 +1981,14 @@ def _render_candlestick(ticker: str, key_prefix: str):
     (a single line of closes) is fine for a table cell but was never meant to BE the price chart;
     clicking a row wants a genuine trading-app-style view, closer to what a real broker shows.
     Reuses the SAME cached load_prices() (2y daily bars) already used for the table's own day-
-    change/sparkline calc -- no new data source. Native st.line_chart can't draw candles at all
-    (no per-bar open/high/low, just a single value per point), so this uses Altair (already
-    wired up for the Home equity chart, no new dependency): a rule mark for the high-low wick
-    layered with a bar mark for the open-close body, both colored green/red by the bar's own
-    direction -- the standard two-layer Altair candlestick recipe."""
+    change/sparkline calc -- no new data source.
+
+    PIIP audit 2026-08: rebuilt on TradingView's Lightweight Charts (see
+    LIGHTWEIGHT_CHARTS_JS / _load_lightweight_charts_js(), first used for the 0DTE intraday
+    chart), same as every other price chart on the platform now -- real scroll/pinch zoom with
+    price auto-fitting the visible range, plus the crosshair OHLC/date legend. Daily bars use a
+    plain {year, month, day} time object (no time-of-day component to get wrong), unlike the
+    intraday chart's ET-seconds handling."""
     try:
         df = load_prices(ticker)
     except Exception as e:
@@ -1997,7 +2000,6 @@ def _render_candlestick(ticker: str, key_prefix: str):
     n = RANGES[rng]
     cdf = (df.tail(n) if n else df).reset_index()
     cdf.columns = ["Date"] + list(cdf.columns[1:])   # normalize whatever yfinance named the index
-    cdf["Color"] = [("#79ed8e" if c >= o else "#ff8080") for c, o in zip(cdf["Close"], cdf["Open"])]
 
     last_close = float(cdf["Close"].iloc[-1])
     day_chg = ((last_close / float(cdf["Close"].iloc[-2]) - 1) * 100) if len(cdf) >= 2 else 0.0
@@ -2007,22 +2009,61 @@ def _render_candlestick(ticker: str, key_prefix: str):
                f'<span style="font-size:0.9rem;color:{chg_color}">{day_chg:+.2f}% (period)</span></div>',
                unsafe_allow_html=True)
 
-    base = alt.Chart(cdf).encode(x=alt.X("Date:T", title=None))
-    wick = base.mark_rule().encode(
-        y=alt.Y("Low:Q", title=None, scale=alt.Scale(zero=False), axis=alt.Axis(orient="right")),
-        y2="High:Q", color=alt.Color("Color:N", scale=None),
-        tooltip=[alt.Tooltip("Date:T"), alt.Tooltip("Open:Q", format="$.2f"),
-                 alt.Tooltip("High:Q", format="$.2f"), alt.Tooltip("Low:Q", format="$.2f"),
-                 alt.Tooltip("Close:Q", format="$.2f")])
-    # Explicit tooltip list, same as the wick layer above -- without it, Altair defaults to
-    # showing every ENCODED field on hover, including the internal "Color" hex string used only
-    # to pick red/green (confirmed live: hovering the candle body showed a raw "Color #79ed8e"
-    # line, meaningless to a user).
-    body = base.mark_bar(size=5 if n and n > 90 else 7).encode(
-        y="Open:Q", y2="Close:Q", color=alt.Color("Color:N", scale=None),
-        tooltip=[alt.Tooltip("Date:T"), alt.Tooltip("Open:Q", format="$.2f"),
-                 alt.Tooltip("Close:Q", format="$.2f")])
-    st.altair_chart((wick + body).properties(height=380), width="stretch")
+    def _bday(ts):
+        return {"year": int(ts.year), "month": int(ts.month), "day": int(ts.day)}
+    candles = [{"time": _bday(r.Date), "open": round(float(r.Open), 4), "high": round(float(r.High), 4),
+               "low": round(float(r.Low), 4), "close": round(float(r.Close), 4)}
+              for r in cdf.itertuples()]
+    chart_id = f"{key_prefix}_candle_{ticker}_{rng}".replace(" ", "_")
+    payload = json.dumps({"candles": candles})
+    html = f"""
+<div id="{chart_id}_legend" style="font-family:ui-monospace,Consolas,monospace;font-size:0.78rem;
+     color:#e8ecec;margin-bottom:0.3rem;min-height:1.2em;">Loading…</div>
+<div id="{chart_id}" style="width:100%;height:365px;"></div>
+<script>{_load_lightweight_charts_js()}</script>
+<script>
+(function() {{
+  const data = {payload};
+  const ticker = {json.dumps(ticker)};
+  const container = document.getElementById("{chart_id}");
+  const legend = document.getElementById("{chart_id}_legend");
+  const chart = LightweightCharts.createChart(container, {{
+    autoSize: true,
+    layout: {{ background: {{ type: "solid", color: "transparent" }}, textColor: "#8b9a9d" }},
+    grid: {{ vertLines: {{ color: "#1c2426" }}, horzLines: {{ color: "#1c2426" }} }},
+    rightPriceScale: {{ borderColor: "#232b2d" }},
+    timeScale: {{ borderColor: "#232b2d" }},
+    crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
+  }});
+  const candleSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {{
+    upColor: "#79ed8e", downColor: "#ff8080", borderVisible: false,
+    wickUpColor: "#79ed8e", wickDownColor: "#ff8080",
+  }});
+  candleSeries.setData(data.candles);
+
+  function fmtDate(t) {{
+    const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    return `${{MONTHS[t.month - 1]}} ${{t.day}}, ${{t.year}}`;
+  }}
+  function updateLegend(param) {{
+    let bar = (param && param.time && param.seriesData) ? param.seriesData.get(candleSeries) : null;
+    if (!bar && data.candles.length) bar = data.candles[data.candles.length - 1];
+    if (!bar) {{ legend.textContent = "No data"; return; }}
+    const upDown = bar.close >= bar.open ? "#79ed8e" : "#ff8080";
+    legend.innerHTML = `<b>${{ticker}}</b> &nbsp; ${{fmtDate(bar.time)}} &nbsp; `
+      + `O <span style="color:${{upDown}}">${{bar.open.toFixed(2)}}</span> `
+      + `H <span style="color:${{upDown}}">${{bar.high.toFixed(2)}}</span> `
+      + `L <span style="color:${{upDown}}">${{bar.low.toFixed(2)}}</span> `
+      + `C <span style="color:${{upDown}}">${{bar.close.toFixed(2)}}</span>`;
+  }}
+  chart.subscribeCrosshairMove(updateLegend);
+  updateLegend(null);
+
+  chart.timeScale().fitContent();
+}})();
+</script>
+"""
+    st.iframe(html, height=395)
 
 
 # ─────────────────────────── Screener ───────────────────────────
