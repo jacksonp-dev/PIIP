@@ -85,9 +85,16 @@ def _split_multi(raw: pd.DataFrame, tickers: list[str]) -> dict[str, pd.DataFram
 def fetch_intraday_batch(tickers: list[str] = ALL_BASKET_TICKERS,
                          interval: str = "1m", period: str = "1d") -> dict[str, pd.DataFrame]:
     """ONE batched request for every basket ticker's intraday bars — never loop per-ticker calls
-    here, that's exactly the polling pattern that gets an IP rate-limited."""
+    here, that's exactly the polling pattern that gets an IP rate-limited.
+
+    PIIP audit 2026-08: prepost=True -- confirmed live that yfinance's default (regular session
+    only) returns NOTHING for "today" until 9:30am ET, even though yfinance DOES have pre-market
+    1m bars available (volume reported as 0 on those bars, a known yfinance limitation, but the
+    price data is real) -- Robinhood shows those pre/post-market bars, so this app's chart looked
+    broken by comparison even though it was working exactly as coded. Applies to every score on
+    this page too, not just the chart, since they all consume this same cached fetch."""
     try:
-        raw = yf.download(tickers=tickers, period=period, interval=interval,
+        raw = yf.download(tickers=tickers, period=period, interval=interval, prepost=True,
                           group_by="ticker", progress=False, threads=True, auto_adjust=True)
     except Exception:
         return {}
