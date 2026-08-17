@@ -2716,6 +2716,16 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
     sma_pts = [{"time": _et_seconds(r.Time), "value": round(float(r.SMA50), 4)}
               for r in cdf.itertuples() if r.SMA50 == r.SMA50]
 
+    # VWAP is a volume-weighted average, and confirmed live: yfinance's free tier reports 0
+    # volume on every pre/post-market bar (prices are real, volume is not) -- so whenever the
+    # visible session is entirely pre/post-market, running_vwap() is correctly all-NaN and there
+    # is genuinely nothing to plot yet, not a rendering bug. Surface that honestly (same pattern
+    # as the staleness banner) instead of a checkbox that silently does nothing.
+    if show_vwap and not vwap_pts:
+        st.caption("⚠️ VWAP has no value yet — pre/post-market bars report 0 trade volume on the "
+                  "free data tier, so there's nothing to average until regular-hours volume starts "
+                  "printing (9:30am ET).")
+
     chart_id = f"{key_prefix}_lwchart_{ticker}_{tf_choice}".replace(" ", "_")
     payload = json.dumps({"candles": candles, "volumes": volumes, "vwap": vwap_pts,
                           "ema": ema_pts, "sma": sma_pts, "showVwap": show_vwap,
