@@ -2482,7 +2482,20 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
     cdf = cdf.reset_index()
     cdf.columns = ["Time"] + list(cdf.columns[1:])
     cdf["Color"] = [("#79ed8e" if c >= o else "#ff8080") for c, o in zip(cdf["Close"], cdf["Open"])]
+    # EMA(50)/SMA(50) on THIS interval's own closes (PIIP audit 2026-08, per user request to match
+    # a real trading terminal's chart) -- a different thing from deterministic.py's daily EMA20/
+    # 50/200 (those run on daily bars for the Daily-timeframe alignment read, not this chart). With
+    # under 50 bars (e.g. early in the session, or on 30m candles where 50 bars needs ~25 hours --
+    # more than one session), these converge toward the visible data rather than being a "true"
+    # 50-period average -- pandas' min_periods=1 default means they still render (no gap), just
+    # less meaningful with a short history, same honesty caveat as every other lookback on this page.
+    cdf["EMA50"] = cdf["Close"].ewm(span=50, adjust=False).mean()
+    cdf["SMA50"] = cdf["Close"].rolling(window=50, min_periods=1).mean()
 
+    # Axis intentionally has NO forced format string -- Vega-Lite's default temporal axis already
+    # shows date labels at day boundaries and time-only within a day (the "better date labeling"
+    # asked for), same contextual behavior as a real trading terminal; hardcoding one format would
+    # lose that if this chart ever grows a multi-day range.
     base = alt.Chart(cdf).encode(x=alt.X("Time:T", title=None))
     wick = base.mark_rule().encode(
         y=alt.Y("Low:Q", title=None, scale=alt.Scale(zero=False)), y2="High:Q",
@@ -2495,17 +2508,31 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
         tooltip=[alt.Tooltip("Time:T"), alt.Tooltip("Open:Q", format="$.2f"),
                  alt.Tooltip("Close:Q", format="$.2f")])
     vwap_line = base.mark_line(color="#87d1ff", strokeWidth=1.5, strokeDash=[3, 2]).encode(
-        y=alt.Y("VWAP:Q"), tooltip=[alt.Tooltip("VWAP:Q", format="$.2f")])
-    # Scroll-to-zoom / drag-to-pan (PIIP audit 2026-08, per user request for Robinhood-style chart
-    # interaction) -- Altair/Vega-Lite's built-in .interactive(), no new charting library. Zooms
-    # both axes together rather than auto-rescaling price to the visible time range the way a real
-    # trading terminal does (that needs a much more involved reactive-selection setup) -- still a
-    # real improvement over a static chart, and honestly labeled as scroll/drag, not a full redo.
-    chart = (wick + body + vwap_line).properties(height=340).interactive(
-        name=f"{key_prefix}_zoom_{ticker}_{tf_choice}")
-    st.altair_chart(chart, width="stretch")
-    st.caption(f"{tf_choice} candles · {len(cdf)} bars · dashed line is the running VWAP · "
-              "scroll/pinch to zoom, drag to pan · refreshes every 30s with the rest of this page.")
+        y=alt.Y("VWAP:Q"), tooltip=[alt.Tooltip("VWAP:Q", format="$.2f", title="VWAP")])
+    ema_line = base.mark_line(color="#c792ea", strokeWidth=1.2).encode(
+        y=alt.Y("EMA50:Q"), tooltip=[alt.Tooltip("EMA50:Q", format="$.2f", title="EMA(50)")])
+    sma_line = base.mark_line(color="#82aaff", strokeWidth=1.2).encode(
+        y=alt.Y("SMA50:Q"), tooltip=[alt.Tooltip("SMA50:Q", format="$.2f", title="SMA(50)")])
+
+    # Scroll-to-zoom / drag-to-pan, synced across the price and volume panels together (PIIP audit
+    # 2026-08, per user request for terminal-style chart interaction) -- Altair/Vega-Lite's built-in
+    # selection_interval(bind="scales"), no new charting library. Zooms both axes of the price panel
+    # together rather than auto-rescaling price to the visible time range the way a real trading
+    # terminal does (that needs a much more involved reactive-selection setup) -- still a real
+    # improvement over a static chart, honestly labeled as scroll/drag, not a full terminal redo.
+    zoom = alt.selection_interval(bind="scales", encodings=["x"],
+                                  name=f"{key_prefix}_zoom_{ticker}_{tf_choice}")
+    price_chart = (wick + body + vwap_line + ema_line + sma_line).properties(
+        height=300).add_params(zoom)
+    volume_chart = base.mark_bar(size=5).encode(
+        y=alt.Y("Volume:Q", title=None), color=alt.Color("Color:N", scale=None),
+        tooltip=[alt.Tooltip("Time:T"), alt.Tooltip("Volume:Q", format=",.0f")]
+    ).properties(height=70)
+    combined = alt.vconcat(price_chart, volume_chart, spacing=4).resolve_scale(x="shared")
+    st.altair_chart(combined, width="stretch")
+    st.caption(f"{tf_choice} candles · {len(cdf)} bars · dashed = VWAP, purple = EMA(50), "
+              "blue = SMA(50) · scroll/pinch to zoom, drag to pan (price and volume zoom together) "
+              "· refreshes every 30s with the rest of this page.")
 
 
 @st.fragment(run_every=30)
