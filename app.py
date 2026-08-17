@@ -414,6 +414,16 @@ def scenario_grid(spot, strike, dte, iv, is_call, entry_premium):
 
 FAVICON = Path(__file__).parent / "assets" / "favicon.png"   # absolute path — robust to CWD
 
+# TradingView Lightweight Charts (Apache 2.0), vendored locally at assets/vendor/ -- PIIP audit
+# 2026-08, per user request for a real trading-terminal-feel intraday chart (auto price-scale on
+# zoom, native crosshair, smooth pan/zoom) that Altair/Vega-Lite (a statistical-charting grammar,
+# not built for this) can't deliver well. Downloaded once via
+# https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js and saved
+# to the repo -- inlined into the HTML component at render time, NEVER fetched from a CDN at
+# runtime, matching this project's local-first rule the same way Altair itself is a bundled
+# Python dependency, not a runtime fetch.
+LIGHTWEIGHT_CHARTS_JS = Path(__file__).parent / "assets" / "vendor" / "lightweight-charts.standalone.production.js"
+
 # "owner/repo" the in-app Feedback page opens pre-filled GitHub issues against. Update this once
 # the repo is actually pushed -- placeholder until then.
 GITHUB_REPO = "jacksonp-dev/PIIP"
@@ -2456,18 +2466,56 @@ def _dna_metric_display(key: str, val) -> str:
     return str(val)
 
 
+@st.cache_resource(show_spinner=False)
+def _load_lightweight_charts_js() -> str:
+    """Read the vendored library once per server process -- it's a static ~200KB file that never
+    changes at runtime, cache_resource (not cache_data) since this is a big constant string with
+    no TTL/per-arg cache key needed."""
+    return LIGHTWEIGHT_CHARTS_JS.read_text(encoding="utf-8")
+
+
+def _et_seconds(ts) -> int:
+    """PIIP audit 2026-08: Lightweight Charts renders numeric `time` values as UTC and displays
+    them as-is -- no per-viewer timezone conversion. Reinterpreting the ET wall-clock numbers AS
+    IF they were UTC (strip tz, treat the naive value as UTC) makes the chart display the correct
+    ET hour:minute regardless of the viewer's own browser timezone, which is what matters here
+    since market hours are inherently ET-based, not the viewer's locale."""
+    naive = ts.tz_localize(None) if ts.tzinfo is not None else ts
+    return int(naive.replace(tzinfo=timezone.utc).timestamp())
+
+
 def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
     """Live intraday candlestick chart for the 0DTE page — refreshes every 30s alongside the rest
     of the page fragment, using the SAME 1m bars already fetched above (no new network call).
-    Same two-layer Altair wick+body recipe as _render_candlestick() (the Screener's daily-bar
-    version) for visual consistency; resamples via tf.resample_ohlc() (already built for the
-    Multi-Timeframe Alignment group) instead of a new resampling implementation, and overlays the
-    running VWAP (det.running_vwap(), already built for VWAP Crossings) rather than recomputing it."""
+
+    PIIP audit 2026-08: rebuilt on TradingView's Lightweight Charts (vendored locally, see
+    LIGHTWEIGHT_CHARTS_JS) instead of Altair -- a real trading-terminal feel needs the price scale
+    to auto-fit whatever time range is visible when you zoom/pan, which Altair/Vega-Lite (a
+    statistical-charting grammar, not built for this) can't do well; Lightweight Charts does this
+    natively, no extra work. Resamples via tf.resample_ohlc() (already built for the Multi-
+    Timeframe Alignment group) instead of a new resampling implementation, and overlays the
+    running VWAP (det.running_vwap(), already built for VWAP Crossings) rather than recomputing it.
+
+    Trade-off to be upfront about: this is real JS running in the viewer's browser, so it can be
+    verified to EMBED and RUN without a Python-side exception, but the actual zoom/pan/crosshair
+    feel can't be confirmed the way everything else on this page has been -- that needs a human
+    to look at it."""
     if intraday_df is None or intraday_df.empty:
         st.info("No intraday bars available right now (market closed, or a data gap).")
         return
-    tf_choice = st.radio("Candle timeframe", ["1m", "5m", "15m", "30m"], index=1, horizontal=True,
-                         key=f"{key_prefix}_candle_tf_{ticker}")
+    c1, c2 = st.columns([2, 3])
+    with c1:
+        tf_choice = st.radio("Candle timeframe", ["1m", "5m", "15m", "30m"], index=1, horizontal=True,
+                             key=f"{key_prefix}_candle_tf_{ticker}")
+    with c2:
+        # Toggleable overlays (PIIP audit 2026-08, per user request -- with all 3 lines always on,
+        # overlapping made them hard to tell apart). VWAP on by default (the single most load-
+        # bearing read on this page); EMA/SMA off by default so the chart starts decluttered.
+        ov1, ov2, ov3 = st.columns(3)
+        show_vwap = ov1.checkbox("VWAP", value=True, key=f"{key_prefix}_show_vwap_{ticker}")
+        show_ema = ov2.checkbox("EMA(50)", value=False, key=f"{key_prefix}_show_ema_{ticker}")
+        show_sma = ov3.checkbox("SMA(50)", value=False, key=f"{key_prefix}_show_sma_{ticker}")
+
     minutes = {"1m": 1, "5m": 5, "15m": 15, "30m": 30}[tf_choice]
     vwap_1m = det.running_vwap(intraday_df)
     if minutes == 1:
@@ -2481,7 +2529,6 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
         cdf["VWAP"] = vwap_1m.resample(f"{minutes}min").last()
     cdf = cdf.reset_index()
     cdf.columns = ["Time"] + list(cdf.columns[1:])
-    cdf["Color"] = [("#79ed8e" if c >= o else "#ff8080") for c, o in zip(cdf["Close"], cdf["Open"])]
     # EMA(50)/SMA(50) on THIS interval's own closes (PIIP audit 2026-08, per user request to match
     # a real trading terminal's chart) -- a different thing from deterministic.py's daily EMA20/
     # 50/200 (those run on daily bars for the Daily-timeframe alignment read, not this chart). With
@@ -2492,47 +2539,78 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
     cdf["EMA50"] = cdf["Close"].ewm(span=50, adjust=False).mean()
     cdf["SMA50"] = cdf["Close"].rolling(window=50, min_periods=1).mean()
 
-    # Axis intentionally has NO forced format string -- Vega-Lite's default temporal axis already
-    # shows date labels at day boundaries and time-only within a day (the "better date labeling"
-    # asked for), same contextual behavior as a real trading terminal; hardcoding one format would
-    # lose that if this chart ever grows a multi-day range.
-    base = alt.Chart(cdf).encode(x=alt.X("Time:T", title=None))
-    wick = base.mark_rule().encode(
-        y=alt.Y("Low:Q", title=None, scale=alt.Scale(zero=False)), y2="High:Q",
-        color=alt.Color("Color:N", scale=None),
-        tooltip=[alt.Tooltip("Time:T"), alt.Tooltip("Open:Q", format="$.2f"),
-                 alt.Tooltip("High:Q", format="$.2f"), alt.Tooltip("Low:Q", format="$.2f"),
-                 alt.Tooltip("Close:Q", format="$.2f")])
-    body = base.mark_bar(size=5).encode(
-        y="Open:Q", y2="Close:Q", color=alt.Color("Color:N", scale=None),
-        tooltip=[alt.Tooltip("Time:T"), alt.Tooltip("Open:Q", format="$.2f"),
-                 alt.Tooltip("Close:Q", format="$.2f")])
-    vwap_line = base.mark_line(color="#87d1ff", strokeWidth=1.5, strokeDash=[3, 2]).encode(
-        y=alt.Y("VWAP:Q"), tooltip=[alt.Tooltip("VWAP:Q", format="$.2f", title="VWAP")])
-    ema_line = base.mark_line(color="#c792ea", strokeWidth=1.2).encode(
-        y=alt.Y("EMA50:Q"), tooltip=[alt.Tooltip("EMA50:Q", format="$.2f", title="EMA(50)")])
-    sma_line = base.mark_line(color="#82aaff", strokeWidth=1.2).encode(
-        y=alt.Y("SMA50:Q"), tooltip=[alt.Tooltip("SMA50:Q", format="$.2f", title="SMA(50)")])
+    candles = [{"time": _et_seconds(r.Time), "open": round(float(r.Open), 4),
+               "high": round(float(r.High), 4), "low": round(float(r.Low), 4),
+               "close": round(float(r.Close), 4)} for r in cdf.itertuples()]
+    volumes = [{"time": _et_seconds(r.Time), "value": float(r.Volume),
+               "color": "#79ed8ea0" if r.Close >= r.Open else "#ff8080a0"}
+              for r in cdf.itertuples()]
+    vwap_pts = [{"time": _et_seconds(r.Time), "value": round(float(r.VWAP), 4)}
+               for r in cdf.itertuples() if r.VWAP == r.VWAP]
+    ema_pts = [{"time": _et_seconds(r.Time), "value": round(float(r.EMA50), 4)}
+              for r in cdf.itertuples() if r.EMA50 == r.EMA50]
+    sma_pts = [{"time": _et_seconds(r.Time), "value": round(float(r.SMA50), 4)}
+              for r in cdf.itertuples() if r.SMA50 == r.SMA50]
 
-    # Scroll-to-zoom / drag-to-pan, synced across the price and volume panels together (PIIP audit
-    # 2026-08, per user request for terminal-style chart interaction) -- Altair/Vega-Lite's built-in
-    # selection_interval(bind="scales"), no new charting library. Zooms both axes of the price panel
-    # together rather than auto-rescaling price to the visible time range the way a real trading
-    # terminal does (that needs a much more involved reactive-selection setup) -- still a real
-    # improvement over a static chart, honestly labeled as scroll/drag, not a full terminal redo.
-    zoom = alt.selection_interval(bind="scales", encodings=["x"],
-                                  name=f"{key_prefix}_zoom_{ticker}_{tf_choice}")
-    price_chart = (wick + body + vwap_line + ema_line + sma_line).properties(
-        height=300).add_params(zoom)
-    volume_chart = base.mark_bar(size=5).encode(
-        y=alt.Y("Volume:Q", title=None), color=alt.Color("Color:N", scale=None),
-        tooltip=[alt.Tooltip("Time:T"), alt.Tooltip("Volume:Q", format=",.0f")]
-    ).properties(height=70)
-    combined = alt.vconcat(price_chart, volume_chart, spacing=4).resolve_scale(x="shared")
-    st.altair_chart(combined, width="stretch")
-    st.caption(f"{tf_choice} candles · {len(cdf)} bars · dashed = VWAP, purple = EMA(50), "
-              "blue = SMA(50) · scroll/pinch to zoom, drag to pan (price and volume zoom together) "
-              "· refreshes every 30s with the rest of this page.")
+    chart_id = f"{key_prefix}_lwchart_{ticker}_{tf_choice}".replace(" ", "_")
+    payload = json.dumps({"candles": candles, "volumes": volumes, "vwap": vwap_pts,
+                          "ema": ema_pts, "sma": sma_pts, "showVwap": show_vwap,
+                          "showEma": show_ema, "showSma": show_sma})
+    html = f"""
+<div id="{chart_id}" style="width:100%;height:380px;"></div>
+<script>{_load_lightweight_charts_js()}</script>
+<script>
+(function() {{
+  const data = {payload};
+  const container = document.getElementById("{chart_id}");
+  const chart = LightweightCharts.createChart(container, {{
+    autoSize: true,
+    layout: {{ background: {{ type: "solid", color: "transparent" }}, textColor: "#8b9a9d" }},
+    grid: {{ vertLines: {{ color: "#1c2426" }}, horzLines: {{ color: "#1c2426" }} }},
+    rightPriceScale: {{ borderColor: "#232b2d" }},
+    timeScale: {{ borderColor: "#232b2d", timeVisible: true, secondsVisible: false }},
+    crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
+  }});
+
+  const candleSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {{
+    upColor: "#79ed8e", downColor: "#ff8080", borderVisible: false,
+    wickUpColor: "#79ed8e", wickDownColor: "#ff8080",
+  }});
+  candleSeries.setData(data.candles);
+
+  try {{
+    const volumeSeries = chart.addSeries(LightweightCharts.HistogramSeries, {{
+      priceFormat: {{ type: "volume" }}, priceScaleId: "",
+    }}, 1);
+    volumeSeries.setData(data.volumes);
+    chart.panes()[1].setHeight(80);
+  }} catch (e) {{ console.warn("PIIP: volume pane unavailable in this chart version", e); }}
+
+  const vwapSeries = chart.addSeries(LightweightCharts.LineSeries, {{
+    color: "#87d1ff", lineWidth: 1, lineStyle: 2, visible: data.showVwap,
+    lastValueVisible: false, priceLineVisible: false, title: "VWAP",
+  }});
+  vwapSeries.setData(data.vwap);
+
+  const emaSeries = chart.addSeries(LightweightCharts.LineSeries, {{
+    color: "#c792ea", lineWidth: 1, visible: data.showEma,
+    lastValueVisible: false, priceLineVisible: false, title: "EMA(50)",
+  }});
+  emaSeries.setData(data.ema);
+
+  const smaSeries = chart.addSeries(LightweightCharts.LineSeries, {{
+    color: "#82aaff", lineWidth: 1, visible: data.showSma,
+    lastValueVisible: false, priceLineVisible: false, title: "SMA(50)",
+  }});
+  smaSeries.setData(data.sma);
+
+  chart.timeScale().fitContent();
+}})();
+</script>
+"""
+    st.iframe(html, height=390)
+    st.caption(f"{tf_choice} candles · {len(cdf)} bars · scroll/pinch to zoom, drag to pan — "
+              "price auto-fits the visible range · refreshes every 30s with the rest of this page.")
 
 
 @st.fragment(run_every=30)
