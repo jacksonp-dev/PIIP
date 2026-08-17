@@ -2848,14 +2848,6 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
   // freshness cap so a stale range from a prior session/day -- whose absolute time coordinates
   // no longer overlap today's data at all -- doesn't get silently restored into an empty-looking
   // view.
-  //
-  // Applying the view synchronously right after setData() wasn't enough: confirmed via the same
-  // CDP-driven test that Lightweight Charts performs its OWN internal default-fit pass shortly
-  // after series data is set (asynchronously, on a later frame), which was silently overwriting
-  // our explicit setVisibleRange() call moments after we made it. Deferring our call to
-  // requestAnimationFrame -- and registering the save-on-pan listener only after that -- makes
-  // ours the one that wins, and stops the library's own transient default from being captured
-  // and saved as if it were a real user pan.
   const rangeKey = "piip_chart_range_{chart_id}";
 
   // Confirmed via a real CDP-driven browser session against the running app (not just AppTest):
