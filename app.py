@@ -2503,6 +2503,21 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
     if intraday_df is None or intraday_df.empty:
         st.info("No intraday bars available right now (market closed, or a data gap).")
         return
+
+    # Session freshness banner (PIIP audit 2026-08): confirmed live -- before market open (or
+    # after a real data gap), yfinance's "today" fetch returns the LAST COMPLETE session instead
+    # (period="1d" has no bars to give for a session that hasn't started yet). Expected behavior,
+    # not a bug -- but a user caught this by hovering the chart and seeing an unexpected date, so
+    # it needs to be obvious up front, not just discoverable via hover or the Data Quality
+    # expander. Same freshness math as data_quality_snapshot() (Batch 1), computed locally here.
+    last_bar_ts = intraday_df.index[-1]
+    now_et = pd.Timestamp.now(tz=last_bar_ts.tz) if last_bar_ts.tzinfo else pd.Timestamp.now()
+    minutes_stale = (now_et - last_bar_ts).total_seconds() / 60
+    if minutes_stale > 15:
+        st.warning(f"⚠️ Showing the LAST COMPLETE session ({last_bar_ts.strftime('%A, %b %d')}) "
+                  "— no live bars yet for today (market not open, or today's data hasn't printed "
+                  "yet). This is NOT today's live chart.")
+
     c1, c2 = st.columns([2, 3])
     with c1:
         tf_choice = st.radio("Candle timeframe", ["1m", "5m", "15m", "30m"], index=1, horizontal=True,
@@ -2557,12 +2572,16 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
                           "ema": ema_pts, "sma": sma_pts, "showVwap": show_vwap,
                           "showEma": show_ema, "showSma": show_sma})
     html = f"""
-<div id="{chart_id}" style="width:100%;height:380px;"></div>
+<div id="{chart_id}_legend" style="font-family:ui-monospace,Consolas,monospace;font-size:0.78rem;
+     color:#e8ecec;margin-bottom:0.3rem;min-height:1.2em;">Loading…</div>
+<div id="{chart_id}" style="width:100%;height:365px;"></div>
 <script>{_load_lightweight_charts_js()}</script>
 <script>
 (function() {{
   const data = {payload};
+  const ticker = {json.dumps(ticker)};
   const container = document.getElementById("{chart_id}");
+  const legend = document.getElementById("{chart_id}_legend");
   const chart = LightweightCharts.createChart(container, {{
     autoSize: true,
     layout: {{ background: {{ type: "solid", color: "transparent" }}, textColor: "#8b9a9d" }},
@@ -2578,8 +2597,9 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
   }});
   candleSeries.setData(data.candles);
 
+  let volumeSeries = null;
   try {{
-    const volumeSeries = chart.addSeries(LightweightCharts.HistogramSeries, {{
+    volumeSeries = chart.addSeries(LightweightCharts.HistogramSeries, {{
       priceFormat: {{ type: "volume" }}, priceScaleId: "",
     }}, 1);
     volumeSeries.setData(data.volumes);
@@ -2604,11 +2624,48 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
   }});
   smaSeries.setData(data.sma);
 
+  // Crosshair legend (PIIP audit 2026-08, per user request -- Robinhood-style OHLC + DATE
+  // readout that follows the cursor, not just the chart library's small built-in axis label,
+  // which is exactly how a user caught a real stale-data situation (Friday's session showing
+  // pre-market Monday) that the axis label alone didn't make obvious enough).
+  const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  function fmtDateTime(utcSeconds) {{
+    // Deliberately uses the UTC getters, not local ones -- these timestamps are ET wall-clock
+    // values reinterpreted as UTC (see _et_seconds() in app.py) specifically so they display
+    // correctly regardless of the viewer's own browser timezone; local getters would apply the
+    // browser's own offset on TOP of that and silently shift the displayed time.
+    const d = new Date(utcSeconds * 1000);
+    const hh = String(d.getUTCHours()).padStart(2, "0");
+    const mi = String(d.getUTCMinutes()).padStart(2, "0");
+    return `${{MONTHS[d.getUTCMonth()]}} ${{d.getUTCDate()}}, ${{d.getUTCFullYear()}} · ${{hh}}:${{mi}} ET`;
+  }}
+  function updateLegend(param) {{
+    let bar = null, vol = null;
+    if (param && param.time && param.seriesData) {{
+      bar = param.seriesData.get(candleSeries);
+      vol = volumeSeries ? param.seriesData.get(volumeSeries) : null;
+    }}
+    if (!bar && data.candles.length) {{
+      bar = data.candles[data.candles.length - 1];
+      vol = data.volumes.length ? data.volumes[data.volumes.length - 1] : null;
+    }}
+    if (!bar) {{ legend.textContent = "No data"; return; }}
+    const upDown = bar.close >= bar.open ? "#79ed8e" : "#ff8080";
+    legend.innerHTML = `<b>${{ticker}}</b> &nbsp; ${{fmtDateTime(bar.time)}} &nbsp; `
+      + `O <span style="color:${{upDown}}">${{bar.open.toFixed(2)}}</span> `
+      + `H <span style="color:${{upDown}}">${{bar.high.toFixed(2)}}</span> `
+      + `L <span style="color:${{upDown}}">${{bar.low.toFixed(2)}}</span> `
+      + `C <span style="color:${{upDown}}">${{bar.close.toFixed(2)}}</span>`
+      + (vol ? ` &nbsp; Vol ${{Math.round(vol.value).toLocaleString()}}` : "");
+  }}
+  chart.subscribeCrosshairMove(updateLegend);
+  updateLegend(null);
+
   chart.timeScale().fitContent();
 }})();
 </script>
 """
-    st.iframe(html, height=390)
+    st.iframe(html, height=395)
     st.caption(f"{tf_choice} candles · {len(cdf)} bars · scroll/pinch to zoom, drag to pan — "
               "price auto-fits the visible range · refreshes every 30s with the rest of this page.")
 
