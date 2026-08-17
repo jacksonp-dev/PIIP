@@ -2719,7 +2719,14 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
     chart_id = f"{key_prefix}_lwchart_{ticker}_{tf_choice}".replace(" ", "_")
     payload = json.dumps({"candles": candles, "volumes": volumes, "vwap": vwap_pts,
                           "ema": ema_pts, "sma": sma_pts, "showVwap": show_vwap,
-                          "showEma": show_ema, "showSma": show_sma})
+                          "showEma": show_ema, "showSma": show_sma,
+                          # PIIP audit 2026-08, per user request: "now" in the SAME faked-UTC
+                          # scheme as every timestamp above (see _et_seconds()) -- lets the chart
+                          # extend its default view through the actual current moment instead of
+                          # fitting tightly around whatever data exists, which made stale data
+                          # (e.g. Friday's session, pre-market Monday) look like a normal, current
+                          # session at a glance instead of visibly stopping short of "now."
+                          "now": _et_seconds(now_et)})
     html = f"""
 <div id="{chart_id}_legend" style="font-family:ui-monospace,Consolas,monospace;font-size:0.78rem;
      color:#e8ecec;margin-bottom:0.3rem;min-height:1.2em;">Loading…</div>
@@ -2810,7 +2817,20 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
   chart.subscribeCrosshairMove(updateLegend);
   updateLegend(null);
 
-  chart.timeScale().fitContent();
+  // Default view extends through the actual current moment (PIIP audit 2026-08, per user
+  // request), not just a tight fit around whatever candles exist -- fitContent() alone made
+  // stale data (e.g. Friday's last session, viewed pre-market Monday) look like a normal, live
+  // session since the chart filled edge-to-edge with old bars. Now the right edge always sits at
+  // "now," so a gap between the last real candle and the edge is immediately visible whenever
+  // the data doesn't reach the present -- same signal the text banner above already gives,
+  // reinforced visually on the chart itself, right where you're actually looking.
+  if (data.candles.length > 0) {{
+    const firstTime = data.candles[0].time;
+    const lastTime = data.candles[data.candles.length - 1].time;
+    chart.timeScale().setVisibleRange({{ from: firstTime, to: Math.max(lastTime, data.now) }});
+  }} else {{
+    chart.timeScale().fitContent();
+  }}
 }})();
 </script>
 """
