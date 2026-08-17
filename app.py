@@ -2864,11 +2864,22 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
     if (viewApplied) return;
     viewApplied = true;
 
-    let restoredRange = null;
+    // Saving/restoring by LOGICAL range (bar index), not time range, per TradingView's own
+    // documented pattern for preserving a chart's view across repeated setData() calls. Time-
+    // based setVisibleRange({{from,to}}) is unreliable specifically for a view that extends into
+    // "whitespace" past the last real bar -- which is exactly our situation, both the default
+    // extend-to-now view and any user pan that leaves margin on the right -- because the library
+    // re-derives how much of that whitespace to actually show each time setData() runs, so the
+    // rendered width visibly changes refresh to refresh even with byte-identical {{from,to}}
+    // values (confirmed: this is what a real screenshot comparison across a refresh showed,
+    // AFTER shiftVisibleRangeOnNewBar was already ruled out as the cause). Logical range doesn't
+    // have this problem -- a logical index of e.g. lastBarIndex+10 means "10 bars of whitespace
+    // past the last bar" consistently, regardless of how much real data now exists there.
+    let restoredLogicalRange = null;
     try {{
       const saved = JSON.parse(localStorage.getItem(rangeKey) || "null");
-      if (saved && saved.range && (Date.now() - saved.savedAt) < 20 * 3600 * 1000) {{
-        restoredRange = saved.range;
+      if (saved && saved.logicalRange && (Date.now() - saved.savedAt) < 20 * 3600 * 1000) {{
+        restoredLogicalRange = saved.logicalRange;
       }}
     }} catch (e) {{}}
 
@@ -2878,9 +2889,10 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
     // live session since the chart filled edge-to-edge with old bars. Now the right edge always
     // sits at "now," so a gap between the last real candle and the edge is immediately visible
     // whenever the data doesn't reach the present. Only applied when there's no restored
-    // pan/zoom position to honor instead.
-    if (restoredRange) {{
-      chart.timeScale().setVisibleRange(restoredRange);
+    // pan/zoom position to honor instead. This part stays time-based -- it's recomputed fresh
+    // every refresh rather than remembered, so time-range's whitespace quirk doesn't apply here.
+    if (restoredLogicalRange) {{
+      chart.timeScale().setVisibleLogicalRange(restoredLogicalRange);
     }} else if (data.candles.length > 0) {{
       const firstTime = data.candles[0].time;
       const lastTime = data.candles[data.candles.length - 1].time;
@@ -2889,9 +2901,9 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
       chart.timeScale().fitContent();
     }}
 
-    chart.timeScale().subscribeVisibleTimeRangeChange((range) => {{
-      if (range) {{
-        try {{ localStorage.setItem(rangeKey, JSON.stringify({{ range: range, savedAt: Date.now() }})); }} catch (e) {{}}
+    chart.timeScale().subscribeVisibleLogicalRangeChange((logicalRange) => {{
+      if (logicalRange) {{
+        try {{ localStorage.setItem(rangeKey, JSON.stringify({{ logicalRange: logicalRange, savedAt: Date.now() }})); }} catch (e) {{}}
       }}
     }});
   }}
