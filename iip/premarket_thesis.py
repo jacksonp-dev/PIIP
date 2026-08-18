@@ -56,7 +56,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, time as dtime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yfinance as yf
@@ -106,9 +107,36 @@ CREATE TABLE IF NOT EXISTS premarket_checkpoint_log (
 """
 
 
+def _migrate(con: sqlite3.Connection) -> None:
+    """Additive, best-effort ALTER TABLEs for columns added after premarket_thesis_log/
+    premarket_checkpoint_log first shipped live this session -- same pattern
+    zero_dte_log.py._migrate() already established (PRAGMA table_info check, swallow the
+    'column already exists' case). Per the explicit user requirement: the AI layer's frozen
+    input (snapshot_json), its validated response (ai_output_json), and the historical
+    backtest's own methodology_version travel with the thesis row itself, and every checkpoint
+    is linked back to its ORIGINAL thesis row via thesis_id -- not just an implicit date+ticker
+    join, so a future schema/methodology change can never quietly re-associate a checkpoint with
+    the wrong thesis."""
+    thesis_cols = {row[1] for row in con.execute("PRAGMA table_info(premarket_thesis_log)").fetchall()}
+    for col, coltype in (("snapshot_json", "TEXT"), ("ai_output_json", "TEXT"),
+                        ("historical_methodology_version", "TEXT")):
+        if col not in thesis_cols:
+            try:
+                con.execute(f"ALTER TABLE premarket_thesis_log ADD COLUMN {col} {coltype}")
+            except sqlite3.OperationalError:
+                pass
+    checkpoint_cols = {row[1] for row in con.execute("PRAGMA table_info(premarket_checkpoint_log)").fetchall()}
+    if "thesis_id" not in checkpoint_cols:
+        try:
+            con.execute("ALTER TABLE premarket_checkpoint_log ADD COLUMN thesis_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
+
+
 def _connect(path: str = DB_PATH) -> sqlite3.Connection:
     con = sqlite3.connect(path)
     con.executescript(SCHEMA)   # 3 CREATE TABLE statements -- execute() only allows one at a time
+    _migrate(con)
     return con
 
 
@@ -137,6 +165,25 @@ def _futures_change_pct(df: pd.DataFrame | None) -> float | None:
         return None
     first, last = float(df["Close"].iloc[0]), float(df["Close"].iloc[-1])
     return round((last / first - 1) * 100, 3) if first else None
+
+
+def overnight_headlines(limit: int = 8) -> list[dict]:
+    """Real, deduplicated, deterministically-scored overnight headlines from the existing
+    Catalyst Terminal (Finnhub free feed) -- windowed to since the prior session's ~4:00pm ET
+    close, top-N by composite_score. Empty list (never an exception, and never silently identical
+    to 'no news happened') if no Finnhub key is configured or the feed fails -- the AI snapshot
+    layer is expected to label this UNAVAILABLE, not treat an empty list as 'quiet overnight'."""
+    from . import catalyst_terminal as ct
+    raw = ct.fetch_raw()
+    if not raw:
+        return []
+    now_utc = datetime.now(timezone.utc)
+    since_et = (datetime.now(ZoneInfo("America/New_York"))
+               .replace(hour=16, minute=0, second=0, microsecond=0) - timedelta(days=1))
+    since_utc = since_et.astimezone(timezone.utc)
+    scored = ct.score_and_dedupe(raw, now=now_utc)
+    overnight = [h for h in scored if datetime.fromisoformat(h["published"]) >= since_utc]
+    return overnight[:limit]
 
 
 # ------------------------------------------------------------------ signal families ----------
@@ -375,13 +422,18 @@ def log_thesis_once(ticker: str, thesis: dict, path: str = DB_PATH) -> bool:
 
 
 def get_todays_thesis(ticker: str, path: str = DB_PATH) -> dict | None:
-    """The immutable thesis logged earlier today, or None if nothing's been logged yet."""
+    """The immutable thesis logged earlier today, or None if nothing's been logged yet. Also
+    surfaces the row's own id (as `_thesis_id`, for linking a checkpoint back to this exact row)
+    and the AI layer's own frozen snapshot/response if `log_thesis_ai_output()` has been called
+    for this row yet (both None otherwise -- a thesis can exist deterministically before the AI
+    layer is ever invoked, e.g. if the user hasn't pressed 'Ask AI')."""
     today = date.today().isoformat()
     try:
         con = _connect(path)
         con.row_factory = sqlite3.Row
         row = con.execute(
-            "SELECT ts, thesis_json FROM premarket_thesis_log WHERE ticker=? AND date=?",
+            "SELECT id, ts, thesis_json, snapshot_json, ai_output_json, "
+            "historical_methodology_version FROM premarket_thesis_log WHERE ticker=? AND date=?",
             (ticker, today)).fetchone()
         con.close()
     except Exception:
@@ -390,7 +442,28 @@ def get_todays_thesis(ticker: str, path: str = DB_PATH) -> dict | None:
         return None
     out = json.loads(row["thesis_json"])
     out["_logged_at"] = row["ts"]
+    out["_thesis_id"] = row["id"]
+    out["_ai_snapshot"] = json.loads(row["snapshot_json"]) if row["snapshot_json"] else None
+    out["_ai_output"] = json.loads(row["ai_output_json"]) if row["ai_output_json"] else None
+    out["_historical_methodology_version"] = row["historical_methodology_version"]
     return out
+
+
+def log_thesis_ai_output(ticker: str, snapshot: dict, ai_output: dict,
+                         methodology_version: str | None, path: str = DB_PATH) -> bool:
+    """Attaches the AI layer's frozen input snapshot + validated (or explicitly invalid) response
+    to TODAY's already-logged thesis row -- write-once, same immutability principle as the thesis
+    itself: an UPDATE that only ever fires while ai_output_json is still NULL, so pressing 'Ask
+    AI' a second time the same morning can never silently replace the first real answer. Returns
+    False (no-op) if no thesis row exists yet for today, or if the AI layer was already logged."""
+    now = datetime.now()
+    with _connect(path) as con:
+        cur = con.execute(
+            "UPDATE premarket_thesis_log SET snapshot_json=?, ai_output_json=?, "
+            "historical_methodology_version=? WHERE ticker=? AND date=? AND ai_output_json IS NULL",
+            (json.dumps(snapshot, default=str), json.dumps(ai_output, default=str),
+             methodology_version, ticker, now.date().isoformat()))
+        return cur.rowcount > 0
 
 
 def log_confirmation_event_once(ticker: str, direction: str, path: str = DB_PATH) -> bool:
@@ -488,16 +561,20 @@ def compute_checkpoint(original_thesis: dict, current_spot: float, current_direc
            "tradeability": tradeability, "tradeability_reason": tradeability_reason}
 
 
-def log_checkpoint(ticker: str, label: str, checkpoint: dict, path: str = DB_PATH) -> bool:
+def log_checkpoint(ticker: str, label: str, checkpoint: dict, thesis_id: int | None = None,
+                   path: str = DB_PATH) -> bool:
     """Same UNIQUE(date, ticker, checkpoint_label)-enforced immutability as the thesis itself --
-    a given checkpoint (e.g. '10:00 AM') is graded once and never silently overwritten."""
+    a given checkpoint (e.g. '10:00 AM') is graded once and never silently overwritten.
+    `thesis_id` (from get_todays_thesis()'s `_thesis_id`) links this checkpoint back to the
+    EXACT original thesis row it's grading, per the explicit user requirement -- not just an
+    implicit date+ticker join that a future schema change could silently misassociate."""
     now = datetime.now()
     with _connect(path) as con:
         cur = con.execute(
             "INSERT OR IGNORE INTO premarket_checkpoint_log (ts, date, ticker, checkpoint_label, "
-            "detail_json) VALUES (?,?,?,?,?)",
+            "detail_json, thesis_id) VALUES (?,?,?,?,?,?)",
             (now.isoformat(timespec="seconds"), now.date().isoformat(), ticker, label,
-             json.dumps(checkpoint)))
+             json.dumps(checkpoint), thesis_id))
         return cur.rowcount > 0
 
 
@@ -507,10 +584,10 @@ def get_checkpoints(ticker: str, target_date: str | None = None, path: str = DB_
         con = _connect(path)
         con.row_factory = sqlite3.Row
         rows = con.execute(
-            "SELECT ts, checkpoint_label, detail_json FROM premarket_checkpoint_log "
+            "SELECT ts, checkpoint_label, detail_json, thesis_id FROM premarket_checkpoint_log "
             "WHERE ticker=? AND date=? ORDER BY ts ASC", (ticker, target_date)).fetchall()
         con.close()
     except Exception:
         return []
-    return [{"ts": r["ts"], "label": r["checkpoint_label"], **json.loads(r["detail_json"])}
-           for r in rows]
+    return [{"ts": r["ts"], "label": r["checkpoint_label"], "thesis_id": r["thesis_id"],
+            **json.loads(r["detail_json"])} for r in rows]

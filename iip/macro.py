@@ -44,6 +44,11 @@ def fetch_macro_batch(period: str = "5d", interval: str = "1d") -> dict[str, pd.
         for tk in MACRO_TICKERS:
             if tk in raw.columns.get_level_values(0):
                 sub = raw[tk].dropna(how="all")
+                # A trailing all-NaN-OHLC-but-real-Volume row survives `how="all"` -- same live
+                # glitch found and fixed in zero_dte._split_multi() this session; dropping any
+                # row with a NaN Close closes the same gap here.
+                if "Close" in sub.columns:
+                    sub = sub[sub["Close"].notna()]
                 if not sub.empty:
                     out[tk] = sub
     return out

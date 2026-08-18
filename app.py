@@ -35,6 +35,8 @@ from iip import journal
 from iip import macro
 from iip import market_dna as mdna
 from iip import portfolio
+from iip import premarket_ai as pai
+from iip import premarket_backtest as pbt
 from iip import premarket_thesis as pt
 from iip import reddit_momentum as rm
 from iip import scanner
@@ -758,6 +760,18 @@ def pt_fetch_futures():
     # futures are the freshest-moving input to the Premarket Thesis, so this shouldn't lag behind
     # the other quotes on the page.
     return pt.fetch_futures_batch()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def pt_backtest_tier1(direction, risk_level, gap_bkt, trend_align):
+    # 30min TTL -- this re-fetches ~60 days of 5m bars across 5 tickers plus 1y of daily bars,
+    # real work that doesn't need to re-run every 30s like the rest of this fragment.
+    return pbt.run_tier1_backtest(direction, risk_level, gap_bkt, trend_align)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def pt_backtest_tier2(direction, gap_bkt, trend_align, vix_bkt):
+    return pbt.run_tier2_backtest(direction, gap_bkt, trend_align, vix_bkt)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -3153,7 +3167,7 @@ def _render_premarket_thesis(index_snaps: dict, vix_snap: dict | None, participa
             market_open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
             checkpoint = pt.compute_checkpoint(original, spy_snap["last"], direction,
                                                confirmation_event, "10:00 AM", market_open_et)
-            pt.log_checkpoint("SPY", "10:00 AM", checkpoint)
+            pt.log_checkpoint("SPY", "10:00 AM", checkpoint, thesis_id=original.get("_thesis_id"))
         except Exception:
             pass
 
@@ -3180,6 +3194,7 @@ def _render_premarket_thesis(index_snaps: dict, vix_snap: dict | None, participa
                         f"tradeability: {cp['tradeability']} ({cp['tradeability_reason']})")
             if not checkpoints:
                 st.caption("No checkpoint graded yet (first one fires at 10:00 ET).")
+        _render_premarket_ai_section(spy_snap, vix_snap, original or thesis)
         return
 
     with st.container(border=True):
@@ -3233,9 +3248,117 @@ def _render_premarket_thesis(index_snaps: dict, vix_snap: dict | None, participa
                 for label, ok in inval["checks"]:
                     st.write(f"{'✓' if ok else '✗'} {label}")
 
-        st.caption("The machine calculates, the AI explains — no LLM narrative in this phase; "
-                  "every number above is code-computed. Immutable once logged each morning — "
+        st.caption("The machine calculates, the AI explains — every number above is code-"
+                  "computed, never invented by an LLM. Immutable once logged each morning — "
                   "today's original read never gets silently rewritten, even by later refreshes.")
+
+    _render_premarket_ai_section(spy_snap, vix_snap, original or thesis)
+
+
+def _render_premarket_ai_section(spy_snap: dict, vix_snap: dict | None, original: dict) -> None:
+    """The optional, cost-gated AI interpretation layer on top of the (already immutable)
+    original thesis -- 7 fixed questions per the ChatGPT-refined spec, ONE call, hard-schema-
+    validated (see iip/premarket_ai.py's own docstring for all 3 guardrails). Always reads from
+    `original` -- the row logged once this morning -- never a live re-fetch, so the frozen
+    snapshot the AI actually sees matches exactly what gets persisted and can be reproduced
+    later. Renders identically whether the deterministic card above is showing PRIMARY or the
+    archived reference view -- once asked, the AI's answer doesn't disappear when the handoff
+    happens."""
+    with st.container(border=True):
+        _info_header("🧠 AI Premarket Thesis (optional, real spend)", (
+            "ONE Claude call answering 7 fixed questions over the deterministic numbers above, "
+            "plus real overnight news (Catalyst Terminal) and two SEPARATE historical backtests "
+            "(shown separately, never blended). The AI explains and reasons — it never "
+            "recomputes a number, and it has no say over Trade Permission, which stays entirely "
+            "code-computed and is shown below the AI's own read regardless of what it concludes. "
+            "Every response is schema-validated before display; a malformed response shows "
+            "INVALID, never a silent best-effort guess."), size="1.3rem")
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            _ai_key_missing_notice()
+            return
+
+        ai_output = original.get("_ai_output")
+        direction = original["market_state"]["direction"]
+        risk_level = original["risk_environment"]["level"]
+        # TODAY's own similarity dimensions -- computed from the SAME already-fetched spy_snap/
+        # vix_snap the deterministic thesis itself used, the SAME functions the backtest applies
+        # to every historical day, so "similar to today" actually compares like with like instead
+        # of matching on direction/risk alone (gap_bkt/trend_align/vix_bkt left as None would
+        # silently widen the similarity pool to almost everything, undermining the whole point of
+        # the similarity-ingredients transparency requirement).
+        gap_bkt = pbt.gap_bucket(spy_snap.get("day_change_pct")) if spy_snap else None
+        trend_align = (pbt.trend_alignment(spy_snap.get("last"), (spy_snap.get("tech") or {}).get("sma50"))
+                       if spy_snap else None)
+        vix_bkt = pbt.vix_bucket(vix_snap.get("last")) if vix_snap else None
+
+        if ai_output is None:
+            if st.button("🧠 Ask AI", key="pt_ai_btn"):
+                with st.spinner("Building snapshot + running historical backtests…"):
+                    try:
+                        releases = get_econ_releases()
+                        tier1 = pt_backtest_tier1(direction, risk_level, gap_bkt, trend_align)
+                        tier2 = pt_backtest_tier2(direction, gap_bkt, trend_align, vix_bkt)
+                        snapshot = pai.build_snapshot(spy_snap, original, releases, tier1, tier2,
+                                                      datetime.now(ZoneInfo("America/New_York")))
+                        client = agents.LLMClient(dry_run=False)
+                        result = pai.ask_ai_thesis(snapshot, client)
+                        methodology_version = tier1.get("methodology_version") or pbt.METHODOLOGY_VERSION
+                        pt.log_thesis_ai_output("SPY", snapshot, result, methodology_version)
+                        if result["_valid"]:
+                            st.toast(f"AI thesis done — ${result.get('_cost', 0):.4f} spent.")
+                        else:
+                            st.toast("AI response failed validation — see below.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"AI call failed: {e}")
+            return
+
+        # Already answered this morning -- render the immutable stored result, never re-call.
+        if not ai_output.get("_valid"):
+            st.error(f"AI Thesis: INVALID RESPONSE — {ai_output.get('_reason', 'unknown')}")
+            if ai_output.get("_dry_run"):
+                st.caption("(Dry-run mode — PIIP_LIVE_LLM isn't set to 1, so no real call was made.)")
+            return
+
+        synth = ai_output["synthesis"]
+        verdict_color = {"SUPPORTS": "#79ed8e", "CONTRADICTS": "#ff8080",
+                        "MIXED": "#fabf6b", "INSUFFICIENT": "#8b9a9d"}.get(synth["verdict"], "#8b9a9d")
+        st.markdown(f'<div style="padding:0.5rem 0.8rem;background:{verdict_color}1a;border:1.5px '
+                   f'solid {verdict_color};border-radius:8px;margin-bottom:0.6rem">'
+                   f'<b style="color:{verdict_color}">Evidence {_esc(synth["verdict"])}</b><br>'
+                   f'<span style="font-size:0.88rem;color:#e8ecec">{_esc(synth["analysis"])}</span>'
+                   f'</div>', unsafe_allow_html=True)
+        st.markdown(f"**Failure mode:** {_esc(synth['failure_mode'])}")
+
+        for label, key in [("Trend Context", "trend_context"), ("Signal Conviction", "signal_conviction"),
+                          ("Risk Environment (AI read)", "risk_environment"),
+                          ("Catalyst Risk", "catalyst_risk"), ("Overnight News", "overnight_news"),
+                          ("Historical Evidence", "historical_evidence")]:
+            with st.expander(label):
+                st.write(ai_output[key]["analysis"])
+
+        # Historical similarity ingredients -- shown explicitly per the "audit why a day was
+        # classified as similar" requirement, never just the HIGH/MEDIUM/LOW label alone.
+        snap = original.get("_ai_snapshot") or {}
+        with st.expander("Historical similarity ingredients"):
+            for tlabel, tier in (("Tier 1 (intraday, ~60d)", snap.get("historical_tier1") or {}),
+                                 ("Tier 2 (daily proxy, ~2y)", snap.get("historical_tier2") or {})):
+                st.markdown(f"**{tlabel}** — {tier.get('similarity_label', 'N/A')}, "
+                           f"N={tier.get('n', 0)}, methodology {tier.get('methodology_version', '?')}")
+                for dim, val in (tier.get("similarity_ingredients") or {}).items():
+                    if dim in ("min_dims_matched", "of_dims"):
+                        continue
+                    st.write(f"· {dim.replace('_', ' ').title()}: {val}")
+
+        # Trade State -- ALWAYS from the deterministic engine, never restated by the AI (the
+        # validator actively rejects a response that tries to include one of its own).
+        perm = original["trade_permission"]
+        perm_color = {"WAIT": "#fabf6b", "CALLS_FAVORED": "#79ed8e", "PUTS_FAVORED": "#ff8080",
+                     "NO_TRADE": "#8b9a9d"}.get(perm["status"], "#8b9a9d")
+        st.markdown(f'<div style="padding:0.4rem 0.7rem;background:{perm_color}1a;border:1px '
+                   f'solid {perm_color};border-radius:6px;margin-top:0.5rem;font-size:0.85rem">'
+                   f'<b style="color:{perm_color}">Trade State (deterministic, not the AI): '
+                   f'{perm["status"].replace("_", " ")}</b></div>', unsafe_allow_html=True)
 
 
 @st.fragment(run_every=30)

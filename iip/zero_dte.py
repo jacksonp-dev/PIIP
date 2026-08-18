@@ -69,16 +69,31 @@ ALL_BASKET_TICKERS = sorted(set(INDEX_TICKERS + MEGA_CAPS + list(SECTOR_ETFS.val
 
 def _split_multi(raw: pd.DataFrame, tickers: list[str]) -> dict[str, pd.DataFrame]:
     """yf.download's multi-ticker return is one wide frame with a (ticker, field) MultiIndex —
-    split it back into the per-ticker OHLCV frames the rest of this codebase expects."""
+    split it back into the per-ticker OHLCV frames the rest of this codebase expects.
+
+    PIIP audit 2026-08 (Premarket Thesis AI layer): `dropna(how="all")` alone doesn't catch a
+    real live glitch confirmed this session -- yfinance occasionally appends a trailing row
+    (most recent session) with all-NaN Open/High/Low/Close but a REAL Volume number, which
+    `how="all"` never drops since not every column is NaN. That silently propagated NaN into
+    det.technical_metrics()'s rolling SMA/EMA calcs (SMA200/above_sma200 reading None for every
+    ticker) across the whole 0DTE page, not just this feature -- also dropping any row with a
+    NaN Close (the one column virtually everything downstream actually depends on) fixes it at
+    the shared source instead of patching every individual consumer."""
     out: dict[str, pd.DataFrame] = {}
     if isinstance(raw.columns, pd.MultiIndex):
         for tk in tickers:
             if tk in raw.columns.get_level_values(0):
                 sub = raw[tk].dropna(how="all")
+                if "Close" in sub.columns:
+                    sub = sub[sub["Close"].notna()]
                 if not sub.empty:
                     out[tk] = sub
     elif len(tickers) == 1 and not raw.empty:
-        out[tickers[0]] = raw
+        sub = raw
+        if "Close" in sub.columns:
+            sub = sub[sub["Close"].notna()]
+        if not sub.empty:
+            out[tickers[0]] = sub
     return out
 
 
