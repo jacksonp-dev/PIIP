@@ -201,10 +201,20 @@ def momentum_engine(intraday_df: pd.DataFrame) -> dict | None:
             "continuation_score_pct": round(continuation_score, 0)}
 
 
-def ticker_health(snap: dict) -> dict:
+def ticker_health(snap: dict, tod_rel_vol: dict | None = None) -> dict:
     """0-100 health composite for one ticker (SPY/QQQ/IWM/DIA) — trend, momentum, buying
-    pressure, structure, relative volume. Itemized, same shape as every other score here."""
+    pressure, structure, relative volume. Itemized, same shape as every other score here.
+
+    `tod_rel_vol` (optional, PIIP audit 2026-08, Phase 4): when the time-of-day-adjusted relative-
+    volume read (zero_dte.time_of_day_relative_volume()) is available, this composite uses IT for
+    the "Relative volume" point contribution and volume_label instead of the cruder full-prior-
+    day-average `snap['rel_volume']`, which the audit confirmed reads artificially low before the
+    close. Falls back to `snap['rel_volume']` when the historical 5m fetch isn't available (it
+    depends on a slower, separately-cached fetch that can fail independently) -- optional and
+    keyword-compatible so existing callers/tests that don't pass it still work unchanged."""
     tech = snap["tech"]
+    rvol_ratio = (tod_rel_vol["ratio"] if tod_rel_vol and tod_rel_vol.get("ratio") is not None
+                 else snap.get("rel_volume"))
     pts = {}
     pts["Trend (EMA alignment)"] = 25 if tech.get("ema_aligned_bull") else (
         -25 if tech.get("ema_aligned_bear") else _lean(
@@ -212,7 +222,7 @@ def ticker_health(snap: dict) -> dict:
     pts["Momentum (RSI)"] = _lean((tech.get("rsi14") or 50) - 50, scale=20, max_pts=20)
     pts["Buying pressure (vs VWAP)"] = _lean(snap.get("pct_from_vwap"), scale=0.3, max_pts=20)
     pts["Structure (day range position)"] = _lean((snap.get("range_pos") or 50) - 50, scale=50, max_pts=15)
-    pts["Relative volume"] = _lean(((snap.get("rel_volume") or 1) - 1) * 100, scale=50, max_pts=20)
+    pts["Relative volume"] = _lean(((rvol_ratio or 1) - 1) * 100, scale=50, max_pts=20)
     raw = sum(pts.values())
     score = round(max(0, min(100, 50 + raw / 2)), 1)   # raw ~ -100..+100 -> 0..100
     return {"score": score, "reasons": pts,
@@ -220,13 +230,27 @@ def ticker_health(snap: dict) -> dict:
                           "Strong Bear" if tech.get("ema_aligned_bear") else "Mixed",
             "momentum_label": "Increasing" if pts["Momentum (RSI)"] > 5 else
                               "Decreasing" if pts["Momentum (RSI)"] < -5 else "Flat",
-            "volume_label": "Strong" if (snap.get("rel_volume") or 0) > 1.3 else
-                            "Light" if (snap.get("rel_volume") or 1) < 0.7 else "Normal"}
+            "volume_label": "Strong" if (rvol_ratio or 0) > 1.3 else
+                            "Light" if (rvol_ratio or 1) < 0.7 else "Normal"}
 
 
 def market_bias(ticker_snap: dict, breadth: dict, vix_snap: dict | None) -> dict:
-    """Signed -100..+100 CALLS-vs-PUTS lean, aggregating multiple independent signals — never
-    one indicator alone. Displayed as a 0-100 CALLS-lean bar: (raw+100)/2."""
+    """Signed -100..+100 bullish-vs-bearish lean, aggregating multiple independent signals — never
+    one indicator alone. Displayed as a 0-100 bullish-lean bar: (raw+100)/2.
+
+    PIIP audit 2026-08 (state-architecture review, Phase 2): `direction_label` (renamed from
+    `recommendation`) now describes MARKET DIRECTION ONLY -- "Strong Bullish"/"Bullish"/
+    "Bearish"/"Strong Bearish"/"No Clear Edge" -- never "CALLS ONLY"/"PUTS ONLY"/"CALLS FAVORED"/
+    "PUTS FAVORED", which told the user which option side to buy directly from the deterministic
+    market-state layer. That's exactly the "bullish market -> BUY CALLS" pattern this project's
+    own architecture says NOT to do: MARKET DIRECTION -> MARKET ENVIRONMENT -> ENTRY CONDITION ->
+    OPTION CONTRACT QUALITY is supposed to be four separate questions (see entry_quality(),
+    options_health(), trade_confidence()'s own docstrings, which already got this right one layer
+    up) -- market_bias() itself was the one place a trade-side directive still leaked in at the
+    source. `calls_pct`/`puts_pct` are UNCHANGED (still useful, still just a naming convention for
+    "how bullish, on a 0-100 scale" inherited from this module's original 0DTE framing -- not a
+    literal instruction to buy calls or puts, same as VIX or a Fear & Greed index isn't an order
+    ticket)."""
     tech = ticker_snap["tech"]
     pts = {}
     pts["VWAP position"] = _lean(ticker_snap.get("pct_from_vwap"), scale=0.3, max_pts=15)
@@ -257,10 +281,14 @@ def market_bias(ticker_snap: dict, breadth: dict, vix_snap: dict | None) -> dict
         env = "Leaning Bull" if raw > 0 else "Leaning Bear"
     else:
         env = "Choppy / Neutral"
-    rec = "CALLS ONLY" if raw >= 50 else "PUTS ONLY" if raw <= -50 else \
-          "CALLS FAVORED" if raw > 15 else "PUTS FAVORED" if raw < -15 else "NO CLEAR EDGE"
+    # Direction-only language (PIIP audit 2026-08, Phase 2) -- describes market direction, never
+    # which option side to buy. "recommendation" is deliberately not the key name anymore either,
+    # so a future reader can't mistake this for a trade instruction just from the field name.
+    direction_label = "Strong Bullish" if raw >= 50 else "Strong Bearish" if raw <= -50 else \
+        "Bullish" if raw > 15 else "Bearish" if raw < -15 else "No Clear Edge"
     return {"calls_pct": calls_score, "puts_pct": round(100 - calls_score, 0), "raw_signed": raw,
-            "confidence_pct": confidence, "environment": env, "recommendation": rec, "reasons": pts}
+            "confidence_pct": confidence, "environment": env, "direction_label": direction_label,
+            "reasons": pts}
 
 
 def nearest_dated_chain(ticker: str) -> dict | None:
@@ -552,6 +580,62 @@ def breadth_score(index_snaps: dict, mega_snaps: dict, sector_snaps: dict) -> di
             "sectors_green": sg, "sectors_red": sr}
 
 
+def participation_state(breadth: dict) -> dict:
+    """PIIP audit 2026-08 (state-architecture review, Phase 3): confirmed double-counting bug --
+    breadth_score() blends indices + mega-caps + sector ETFs into ONE green/red tally, but the
+    mega-caps and the sector ETFs are NOT independent: XLK/XLC etc already CONTAIN the same
+    mega-caps counted individually, so a single correlated move (e.g. NVDA/MSFT/AAPL all up)
+    got counted as up to 3x "confirmation" once in breadth_score() itself and then AGAIN as two
+    more separate confluence_score() checks ("Sector Health agrees", "Mega Cap Health agrees").
+
+    Fix: treat INDEX / MEGA-CAP / SECTOR as three BUCKETS (not ~24 individual votes), each bucket
+    scored once from its own green/red count, then combine the three bucket-level reads --
+    correlated within each bucket, meaningfully less correlated ACROSS buckets (an index ETF
+    move, a market-cap-weighted mega-cap tally, and a sector-ETF tally can and do diverge) --
+    instead of pretending 24 individually-counted tickers are 24 independent votes. Preserves all
+    the raw green/red counts (still shown via breadth_score()/sector_health()/mega_cap_health()
+    directly) -- this is a NEW interpretation layer on top, not a replacement.
+
+    Thresholds below (50 / 20) are a first-pass guess, same discipline as market_dna.THRESHOLDS
+    and zero_dte.day_regime()'s own thresholds -- flagged for calibration once real sessions have
+    been logged, not presented as final."""
+    def _bucket_signed(green: int, red: int) -> float | None:
+        total = green + red
+        return round((green - red) / total * 100, 1) if total else None
+
+    buckets = {
+        "Index": _bucket_signed(breadth["indices_green"], breadth["indices_red"]),
+        "Mega-Cap": _bucket_signed(breadth["mega_caps_green"], breadth["mega_caps_red"]),
+        "Sector": _bucket_signed(breadth["sectors_green"], breadth["sectors_red"]),
+    }
+    available = [(name, v) for name, v in buckets.items() if v is not None]
+    if not available:
+        return {"state": "INSUFFICIENT DATA", "buckets": buckets, "avg_signed": None,
+                "agree": False, "n_buckets": 0,
+                "note": "No index/mega-cap/sector data available right now."}
+
+    avg_signed = round(sum(v for _, v in available) / len(available), 1)
+    signs = [1 if v > 0 else -1 if v < 0 else 0 for _, v in available]
+    agree = all(s == signs[0] for s in signs) and signs[0] != 0
+
+    THRESHOLDS = {"strong": 50.0, "moderate": 20.0}
+    if not agree:
+        state = "MIXED"
+    elif abs(avg_signed) >= THRESHOLDS["strong"]:
+        state = "STRONG"
+    elif abs(avg_signed) >= THRESHOLDS["moderate"]:
+        state = "MODERATE"
+    else:
+        state = "WEAK"
+
+    return {"state": state, "buckets": buckets, "avg_signed": avg_signed, "agree": agree,
+            "n_buckets": len(available),
+            "note": ("Index/Mega-Cap/Sector buckets treated as 3 correlated-within, less-"
+                    "correlated-across confirmations -- not 24 independent votes. Thresholds "
+                    f"(±{THRESHOLDS['strong']:.0f} strong, ±{THRESHOLDS['moderate']:.0f} "
+                    "moderate) are a first-pass guess, not calibrated yet.")}
+
+
 def sector_health(sector_snaps: dict) -> dict:
     """Per-sector-ETF score + overall confirmation count — is the WHOLE market behind the move,
     or just one or two sectors carrying it?"""
@@ -681,10 +765,10 @@ def trend_integrity(alignment: dict, crossings: dict | None, efficiency: dict | 
 
 def no_clear_edge_reasons(bias: dict, confluence: dict, crossings: dict | None,
                           alignment: dict, reversal: dict) -> list[str]:
-    """PIIP audit 2026-08, Batch 1 (Phase 21): makes 'NO CLEAR EDGE' an EXPLAINED first-class
+    """PIIP audit 2026-08, Batch 1 (Phase 21): makes 'No Clear Edge' an EXPLAINED first-class
     outcome instead of a bare label nobody can act on -- itemizes the specific reasons, pulled
     only from measurements already computed elsewhere on the page. Empty list when there IS a
-    real edge (caller only renders this when bias['recommendation'] == 'NO CLEAR EDGE')."""
+    real edge (caller only renders this when bias['direction_label'] == 'No Clear Edge')."""
     reasons = []
     if abs(bias["raw_signed"]) <= 15:
         reasons.append(f"Market Bias has no real lean ({bias['raw_signed']:+.0f}, needs beyond "
@@ -775,7 +859,17 @@ def day_regime(trend_state: dict, integrity: dict, alignment: dict, reversal: di
     WEAKENING, REGIME TRANSITION. Thresholds below are a first-pass guess (10 min / 50 integrity /
     40 integrity / 60 reversal pressure), same as market_dna.py's own THRESHOLDS dict -- flagged
     for calibration once real sessions have been logged (see iip/zero_dte_log.py), not presented
-    as final."""
+    as final.
+
+    State-architecture review (PIIP audit 2026-08): confirmed this is NOT a duplicate of
+    market_dna.classify() -- that function answers a session-shape question (Gap & Go / Trend Day
+    / Chop / Grind / Range Bound) that's stable for the whole day; this one answers a live
+    directional-trajectory question that changes several times within a single Market DNA day-
+    type as the intraday trend develops, pulls back, and resumes. See market_dna.py's module
+    docstring for the full comparison. This is the CURRENT REGIME layer of the intended
+    DAY TYPE -> CURRENT REGIME -> TRADE ENVIRONMENT stack; day_regime() itself already IS the
+    trade-environment-adjacent read (its states double as "is this worth trading directionally
+    right now" context), so no separate fourth classifier was added for that."""
     if alignment["total"] == 0:
         return {"state": "INSUFFICIENT DATA", "direction": None, "trend_age_minutes": trend_age_minutes,
                 "reasons": ["No timeframe has enough of today's session printed yet."]}
@@ -805,6 +899,205 @@ def day_regime(trend_state: dict, integrity: dict, alignment: dict, reversal: di
             "reasons": [f"Trend Integrity {integrity['score']:.0f}/100", f"State is {age_bit}"]}
 
 
+_TF_ORDER = ["5m", "15m", "30m", "Daily"]   # shortest to longest, same order as timeframe.py
+
+
+def build_regime_detail(tf_snapshot: dict, snap: dict, crossings: dict | None,
+                        integrity: dict, efficiency: dict | None, reversal: dict,
+                        participation: dict, alignment: dict | None = None,
+                        trend_state: dict | None = None,
+                        trend_age_minutes: float | None = None) -> dict:
+    """PIIP audit 2026-08 (state-architecture review, Phase 5): the point-in-time fact bundle
+    stored alongside every regime_timeline row (see zero_dte_log.TIMELINE_SCHEMA's `detail`
+    column) -- pure snapshot of measurements already computed elsewhere on the page, nothing
+    derived or interpreted here. explain_transition() below diffs two of these (the transition's
+    own detail vs. the prior logged row's detail) to build the "What Changed?" explanation.
+
+    `alignment`/`trend_state`/`trend_age_minutes` (optional, added after a live-data review found
+    a real gap: several real transitions today were driven by the hysteresis/alignment machinery
+    -- e.g. alignment_pct crossing the 60% threshold that flips trend_state's pending candidate,
+    or trend_age crossing the 10-minute DEVELOPING->CONFIRMED boundary -- neither of which was
+    captured anywhere in the detail bundle, so explain_transition() had nothing to point to for
+    those transitions even though day_regime() itself had a real, computed reason. Optional and
+    keyword-compatible so existing callers/tests that don't pass them still work unchanged."""
+    pct_from_vwap = snap.get("pct_from_vwap")
+    return {
+        **{tf: tf_snapshot.get(tf, {}).get("direction") for tf in _TF_ORDER},
+        "vwap_side": ("Above" if pct_from_vwap >= 0 else "Below") if pct_from_vwap is not None else None,
+        "vwap_distance_pct": round(pct_from_vwap, 3) if pct_from_vwap is not None else None,
+        "vwap_crossings": crossings["count"] if crossings else None,
+        "trend_integrity": integrity["score"],
+        "trend_efficiency": efficiency["efficiency_pct"] if efficiency else None,
+        "reversal_pressure": reversal["reversal_pressure_score"],
+        "participation_state": participation["state"],
+        "alignment_pct": alignment.get("alignment_pct") if alignment else None,
+        "trend_state_label": trend_state.get("state") if trend_state else None,
+        "trend_age_minutes": round(trend_age_minutes, 1) if trend_age_minutes is not None else None,
+    }
+
+
+def explain_transition(prev_detail: dict | None, detail: dict, from_state: str | None,
+                       to_state: str, to_reasons: list[str] | None = None) -> dict:
+    """PIIP audit 2026-08 (state-architecture review, Phase 5): 'WHY did the state change' --
+    diffs two build_regime_detail() fact bundles (the state BEFORE this transition vs. AFTER) and
+    reports only measured deltas, same "only what was actually measured" discipline as
+    day_regime()'s own reasons field. Never invents a causal story -- every line below traces back
+    to an actual before/after field comparison. Deliberately reuses the longest-vs-shortest-
+    timeframe lens already proven in timeframe.interpret_timeframe_sequence() rather than a new
+    independent judgment call, applied here to what specifically CHANGED rather than to a single
+    point-in-time read.
+
+    `prev_detail` is None for the day's first transition (no prior state to diff against) or for
+    a transition immediately following a row logged before the Phase 5 schema addition -- returns
+    a degraded-but-honest explanation in that case, not a fabricated one.
+
+    `to_reasons` (optional, added after a live-data review of a real trading session): day_regime()
+    ALWAYS computes real reasons for whatever state it returns (already stored on the timeline
+    row) -- passing them through here gives explain_transition() a GUARANTEED, grounded-in-real-
+    computation fallback for transitions driven by mechanics this function doesn't diff directly
+    (see the alignment/trend_state/trend_age checks below, which cover the most common such cases,
+    but can't cover every path through day_regime()'s logic). Without `to_reasons`, those residual
+    cases still degrade honestly rather than fabricating something -- they just say less."""
+    if prev_detail is None:
+        return {"primary": None, "supporting": [], "higher_timeframes": {},
+                "interpretation": f"First logged regime read of the day (or no prior detail "
+                                  f"recorded) — moved to {to_state} with no earlier snapshot to "
+                                  "compare against."}
+
+    flipped = [tf for tf in _TF_ORDER
+              if prev_detail.get(tf) and detail.get(tf) and prev_detail[tf] != detail[tf]]
+
+    primary = None
+    if flipped:
+        tf = flipped[0]   # shortest timeframe that flipped -- most decision-relevant for 0DTE
+        primary = f"{tf} timeframe flipped {prev_detail[tf]} → {detail[tf]}"
+
+    # PIIP audit 2026-08 (live-data review, Phase 5 follow-up): a real SPY session showed several
+    # transitions with no timeframe flip AND no >=5-point integrity/reversal move -- e.g. driven by
+    # timeframe.update_trend_state()'s hysteresis, which flips its CANDIDATE the instant
+    # alignment_pct crosses the 60% threshold (a single-point move right at the boundary is enough,
+    # not necessarily a big swing), or by trend_age crossing the 10-minute DEVELOPING->CONFIRMED
+    # line with zero change in any other measurement. Checked in the same "most decision-relevant
+    # first" order as the timeframe-flip check above.
+    if primary is None and detail.get("alignment_pct") is not None and \
+            prev_detail.get("alignment_pct") is not None:
+        p, c = prev_detail["alignment_pct"], detail["alignment_pct"]
+        if (p >= 60) != (c >= 60):
+            primary = (f"Timeframe alignment {'crossed above' if c >= 60 else 'fell below'} the "
+                      f"60% hysteresis threshold ({p:.0f}% → {c:.0f}%)")
+        elif abs(c - p) >= 15:
+            primary = f"Timeframe alignment shifted from {p:.0f}% to {c:.0f}%"
+    if primary is None and detail.get("trend_state_label") and prev_detail.get("trend_state_label") \
+            and detail["trend_state_label"] != prev_detail["trend_state_label"]:
+        primary = (f"Trend State changed from {prev_detail['trend_state_label']} to "
+                  f"{detail['trend_state_label']}")
+    if primary is None and detail.get("trend_age_minutes") is not None and \
+            prev_detail.get("trend_age_minutes") is not None:
+        p, c = prev_detail["trend_age_minutes"], detail["trend_age_minutes"]
+        if p < 10 <= c:
+            primary = f"State turned {c:.0f} min old, crossing the 10-minute confirmation threshold"
+    if primary is None:
+        # No timeframe flipped -- the transition came from integrity/reversal/participation
+        # moving instead (e.g. TREND WEAKENING while every timeframe still agrees on direction).
+        if detail.get("trend_integrity") is not None and prev_detail.get("trend_integrity") is not None:
+            d = detail["trend_integrity"] - prev_detail["trend_integrity"]
+            if abs(d) >= 5:
+                primary = (f"Trend Integrity {'improved' if d > 0 else 'declined'} from "
+                          f"{prev_detail['trend_integrity']:.0f} to {detail['trend_integrity']:.0f}")
+        if primary is None and detail.get("reversal_pressure") is not None and \
+                prev_detail.get("reversal_pressure") is not None:
+            d = detail["reversal_pressure"] - prev_detail["reversal_pressure"]
+            if abs(d) >= 5:
+                primary = (f"Reversal Pressure {'increased' if d > 0 else 'decreased'} from "
+                          f"{prev_detail['reversal_pressure']:.0f} to {detail['reversal_pressure']:.0f}")
+    if primary is None and to_reasons:
+        # Guaranteed fallback: day_regime()'s OWN computed reasons for the state we ended up in --
+        # real measurements, not invented, just not one of the specific diff patterns checked
+        # above. Better than a generic "see primary/supporting" pointer when both are empty.
+        primary = "; ".join(to_reasons)
+
+    supporting = []
+    if detail.get("vwap_distance_pct") is not None and prev_detail.get("vwap_distance_pct") is not None:
+        d = detail["vwap_distance_pct"] - prev_detail["vwap_distance_pct"]
+        if abs(d) >= 0.03:
+            supporting.append(f"VWAP distance {'rose' if d > 0 else 'fell'} from "
+                              f"{prev_detail['vwap_distance_pct']:+.2f}% to "
+                              f"{detail['vwap_distance_pct']:+.2f}%")
+    if detail.get("reversal_pressure") is not None and prev_detail.get("reversal_pressure") is not None \
+            and "Reversal Pressure" not in (primary or ""):
+        d = detail["reversal_pressure"] - prev_detail["reversal_pressure"]
+        if abs(d) >= 5:
+            supporting.append(f"Reversal Pressure {'increased' if d > 0 else 'decreased'} from "
+                              f"{prev_detail['reversal_pressure']:.0f} to {detail['reversal_pressure']:.0f}")
+    if detail.get("participation_state") and prev_detail.get("participation_state") and \
+            detail["participation_state"] != prev_detail["participation_state"]:
+        supporting.append(f"Participation changed from {prev_detail['participation_state']} "
+                          f"to {detail['participation_state']}")
+    if detail.get("trend_integrity") is not None and prev_detail.get("trend_integrity") is not None \
+            and "Trend Integrity" not in (primary or ""):
+        d = detail["trend_integrity"] - prev_detail["trend_integrity"]
+        if abs(d) >= 5:
+            supporting.append(f"Trend Integrity {'improved' if d > 0 else 'declined'} from "
+                              f"{prev_detail['trend_integrity']:.0f} to {detail['trend_integrity']:.0f}")
+    if detail.get("vwap_crossings") is not None and prev_detail.get("vwap_crossings") is not None:
+        d = detail["vwap_crossings"] - prev_detail["vwap_crossings"]
+        if d > 0:
+            supporting.append(f"{d} additional VWAP crossing(s) since the prior read")
+    if detail.get("alignment_pct") is not None and prev_detail.get("alignment_pct") is not None \
+            and "alignment" not in (primary or "").lower():
+        p, c = prev_detail["alignment_pct"], detail["alignment_pct"]
+        if abs(c - p) >= 10:
+            supporting.append(f"Timeframe alignment moved from {p:.0f}% to {c:.0f}%")
+    if detail.get("trend_state_label") and prev_detail.get("trend_state_label") \
+            and detail["trend_state_label"] != prev_detail["trend_state_label"] \
+            and "Trend State changed" not in (primary or ""):
+        supporting.append(f"Trend State changed from {prev_detail['trend_state_label']} to "
+                          f"{detail['trend_state_label']}")
+    for tf in flipped[1:]:
+        supporting.append(f"{tf} timeframe also flipped {prev_detail[tf]} → {detail[tf]}")
+
+    higher_timeframes = {tf: detail.get(tf) for tf in _TF_ORDER if detail.get(tf)}
+
+    # Interpretation -- templated from the SAME longest-vs-shortest lens as
+    # interpret_timeframe_sequence(), applied to what changed rather than a single snapshot.
+    interpretation = None
+    if flipped:
+        tf = flipped[0]
+        idx = _TF_ORDER.index(tf)
+        longer = [(t, detail.get(t)) for t in _TF_ORDER[idx + 1:] if detail.get(t)]
+        longer_dirs = [d for _, d in longer]
+        new_dir = detail.get(tf)
+        if longer_dirs and all(d == longer_dirs[0] for d in longer_dirs) and \
+                longer_dirs[0] not in (None, "Flat") and longer_dirs[0] != new_dir:
+            interpretation = (
+                f"Short-term deterioration while higher timeframes remain {longer_dirs[0].lower()}. "
+                f"This currently resembles a pullback rather than a confirmed "
+                f"{(new_dir or 'directional').lower()} reversal.")
+        elif longer_dirs and new_dir is not None and all(d == new_dir for d in longer_dirs):
+            interpretation = (f"{tf} has now joined the higher timeframes ({longer_dirs[0].lower()}) "
+                              "— broader alignment, not just a short-term move.")
+        else:
+            interpretation = (f"{tf} flipped to {new_dir}, but the remaining available timeframes "
+                              "are mixed — no single clean higher-timeframe read yet.")
+    if interpretation is None:
+        # PIIP audit 2026-08 (live-data review, Phase 5 follow-up): the old generic pointer here
+        # ("see primary and supporting") was itself unhelpful whenever primary/supporting were
+        # ALSO empty -- confirmed live on a real SPY session, several transitions driven by the
+        # hysteresis/alignment machinery had nothing for the old text to point to. Now states
+        # what was actually found (primary, if any) directly instead of just pointing at it.
+        if primary:
+            interpretation = (f"Moved from {from_state or 'no prior state'} to {to_state}: "
+                              f"{primary.rstrip('.')}.")
+        else:
+            interpretation = (f"Moved from {from_state or 'no prior state'} to {to_state} — no "
+                              "individual measurement crossed a tracked threshold; day_regime() "
+                              "reasons weren't available for this row either (predates the "
+                              "detailed tracking, or day_regime() gave no reasons for this state).")
+
+    return {"primary": primary, "supporting": supporting,
+            "higher_timeframes": higher_timeframes, "interpretation": interpretation}
+
+
 def data_quality_snapshot(intraday_df: pd.DataFrame | None, chain: dict | None,
                           tf_snapshot: dict) -> dict:
     """PIIP audit 2026-08, Batch 1 (Phase 22): consolidates the freshness/proxy caveats already
@@ -827,9 +1120,9 @@ def data_quality_snapshot(intraday_df: pd.DataFrame | None, chain: dict | None,
             "timeframe_availability": timeframe_availability}
 
 
-def confluence_score(bias: dict, breadth: dict, sector: dict, mega: dict,
-                     momentum: dict | None, reversal: dict, snap: dict,
-                     alignment: dict | None = None) -> dict:
+def confluence_score(bias: dict, participation: dict, momentum: dict | None, reversal: dict,
+                     snap: dict, alignment: dict | None = None,
+                     tod_rel_vol: dict | None = None) -> dict:
     """How many independent signals actually agree with Market Bias's own lean, itemized.
 
     market_bias() already computes something like this internally (an "agree" count feeding its
@@ -838,29 +1131,40 @@ def confluence_score(bias: dict, breadth: dict, sector: dict, mega: dict,
     a confirming DECLINE correctly counts as agreement, not as a red flag. Same itemized,
     no-black-box shape as every other score in this module.
 
+    PIIP audit 2026-08 (state-architecture review, Phase 3): the previous 3 separate checks
+    ("Breadth agrees", "Sector Health agrees", "Mega Cap Health agrees") double-counted the same
+    correlated mega-cap moves -- confirmed live (mega-caps are literal CONSTITUENTS of the sector
+    ETFs also being counted). Replaced with ONE "Participation agrees" check driven by
+    participation_state()'s 3-bucket (Index/Mega-Cap/Sector) synthesis -- takes `participation`
+    (from participation_state(breadth)) instead of raw breadth/sector/mega dicts, since those
+    three were only ever used to build these now-consolidated checks.
+
     `alignment` (optional, from iip.timeframe.timeframe_alignment(), PIIP audit 2026-08 Option B):
     adds one more itemized check for whether the multi-timeframe read agrees with bias's lean.
-    Optional and keyword-compatible so existing callers/tests that don't pass it still work
-    unchanged -- when omitted the check is simply left out, not scored as a fail."""
+    `tod_rel_vol` (optional, PIIP audit 2026-08 Phase 4): when the time-of-day-adjusted relative-
+    volume read is available, the "Relative Volume confirms conviction" check uses IT instead of
+    the cruder full-day-average `snap['rel_volume']` (which reads artificially low before the
+    close) -- falls back to the old field when the historical fetch isn't available. Both optional
+    and keyword-compatible so existing callers/tests that don't pass them still work unchanged."""
     lean = 1 if bias["raw_signed"] >= 0 else -1
-    sector_confirm = sector["overall_confirmation_pct"] if lean > 0 else (100 - sector["overall_confirmation_pct"])
-    mega_confirm = mega["score"] if lean > 0 else (100 - mega["score"])
+    participation_confirm = (participation["avg_signed"] is not None and
+                             participation["avg_signed"] * lean > 10)
+    rvol_ratio = (tod_rel_vol["ratio"] if tod_rel_vol and tod_rel_vol.get("ratio") is not None
+                 else snap.get("rel_volume"))
     checks = [
         ("Market Bias has a real lean (not neutral/choppy)", abs(bias["raw_signed"]) > 15),
-        ("Breadth agrees", (breadth.get("score_signed") or 0) * lean > 10),
-        ("Sector Health agrees", sector_confirm > 50),
-        ("Mega Cap Health agrees", mega_confirm > 50),
+        ("Participation agrees", participation_confirm),
         ("Momentum agrees", bool(momentum) and momentum["velocity_pct"] * lean > 0),
         ("Price is on the bias side of VWAP", (snap.get("pct_from_vwap") or 0) * lean > 0),
         ("Reversal Pressure is low", reversal["reversal_pressure_score"] < 40),
-        ("Relative Volume confirms conviction", (snap.get("rel_volume") or 0) > 1.0),
+        ("Relative Volume confirms conviction", (rvol_ratio or 0) > 1.0),
     ]
     if alignment and alignment["total"] > 0:
         bias_dir = "Bullish" if lean > 0 else "Bearish"
         checks.append(("Multi-timeframe alignment agrees", alignment["aligned_direction"] == bias_dir))
     agree = sum(1 for _, ok in checks if ok)
     return {"agree": agree, "total": len(checks), "checks": checks,
-            "lean_label": "CALLS" if lean > 0 else "PUTS"}
+            "lean_label": "Bullish" if lean > 0 else "Bearish"}
 
 
 def entry_quality(bias: dict, health: dict | None, momentum: dict | None,

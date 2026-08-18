@@ -95,6 +95,30 @@ def _md_safe(s) -> str:
     return str(s).replace("$", "\\$")
 
 
+def _info_header(label: str, tooltip: str, size: str = "0.95rem",
+                 color: str = "#87d1ff") -> None:
+    """Section header with a bright, noticeable hover-info icon (per user request, app-wide
+    cohesiveness pass 2026-08) -- replaces long always-visible caption paragraphs that used to sit
+    permanently under a header, eating vertical space, with a single-line header plus an ⓘ icon
+    that reveals the same text on hover.
+
+    Deliberately custom HTML (colored circular badge + native `title` attribute) instead of
+    Streamlit's own `st.caption(..., help=...)` icon -- confirmed live the native one renders as a
+    small pale grey circle that's easy to miss entirely; this is the same title-attribute tooltip
+    pattern already used for the DNA metrics tiles, just packaged as a reusable header. `color`
+    defaults to the app's existing info/neutral accent (#87d1ff, already used for Breadth "Mixed",
+    NVDA RS "In-line", etc.) -- pass a different bright platform color (e.g. #79ed8e green,
+    #fabf6b amber) to match a specific section's own accent instead."""
+    safe_tooltip = _esc(tooltip).replace('"', "&quot;")
+    st.markdown(
+        f'<div style="display:flex;align-items:center;gap:0.45rem;margin:0.1rem 0 0.2rem 0">'
+        f'<span style="font-weight:700;font-size:{size}">{label}</span>'
+        f'<span title="{safe_tooltip}" style="display:inline-flex;align-items:center;'
+        f'justify-content:center;width:1.15rem;height:1.15rem;border-radius:50%;flex-shrink:0;'
+        f'background:{color};color:#0a0f10;font-size:0.72rem;font-weight:900;cursor:help;'
+        f'line-height:1">ⓘ</span></div>', unsafe_allow_html=True)
+
+
 def _render_kpi_tiles(s: dict, dpnl: dict | None):
     """Shared 6-tile KPI grid (Equity/Today/Realized P&L, Cash available/Open positions/
     Unrealized P&L) -- used by BOTH the Home page and the Paper tab's positions block
@@ -718,6 +742,17 @@ def zd_fetch_historical_5m(ticker):
     # the time-of-day-adjusted relative-volume baseline, not a live quote. Re-fetching it every
     # 30s refresh would be pointless load for data that's the same all session.
     return zd.fetch_historical_5m(ticker)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def zd_regime_stats(ticker):
+    # 5-min TTL (per user request, promoted from a manual on-demand button to an always-visible
+    # "headline" table) -- reads the whole Signal Calibration Log via a SQL query + groupby, real
+    # but not free work, so this still respects the project's own rule of separating live state
+    # (30s refresh) from historical validation (this) rather than recomputing it every fragment
+    # rerun. 5 minutes is a reasonable "how current does a statistics table need to be" cadence --
+    # nothing about market state itself is read from this, only past-outcome context.
+    return zdlog.regime_stats(ticker)
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -2633,7 +2668,8 @@ def _render_lightweight_lines(series: dict, key_prefix: str, colors: dict | None
     st.iframe(html, height=height + 30)
 
 
-def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
+def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str,
+                                 data_quality: dict | None = None):
     """Live intraday candlestick chart for the 0DTE page — refreshes every 30s alongside the rest
     of the page fragment, using the SAME 1m bars already fetched above (no new network call).
 
@@ -2658,11 +2694,26 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
     # (period="1d" has no bars to give for a session that hasn't started yet). Expected behavior,
     # not a bug -- but a user caught this by hovering the chart and seeing an unexpected date, so
     # it needs to be obvious up front, not just discoverable via hover or the Data Quality
-    # expander. Same freshness math as data_quality_snapshot() (Batch 1), computed locally here.
+    # expander.
+    #
+    # PIIP audit 2026-08 (state-architecture review, Phase 7): this used to recompute the exact
+    # same freshness math data_quality_snapshot() already does -- confirmed duplicate logic, one
+    # genuine source of "could two freshness checks on this page ever disagree" risk. Now REUSES
+    # the caller's already-computed data_quality dict when passed in (the 0DTE page always has one
+    # by the time this chart renders); only falls back to a local computation when called without
+    # one, so this function still works standalone.
+    # `now_et` is needed below regardless of which freshness path is used (the chart's "now"
+    # payload field extends the default view through the current moment) -- always computed
+    # locally (cheap, no network call), only the STALENESS VERDICT itself prefers data_quality.
     last_bar_ts = intraday_df.index[-1]
     now_et = pd.Timestamp.now(tz=last_bar_ts.tz) if last_bar_ts.tzinfo else pd.Timestamp.now()
-    minutes_stale = (now_et - last_bar_ts).total_seconds() / 60
-    if minutes_stale > 15:
+    if data_quality is not None:
+        minutes_stale = data_quality.get("underlying_minutes_stale")
+        is_stale = data_quality.get("underlying") == "Stale"
+    else:
+        minutes_stale = (now_et - last_bar_ts).total_seconds() / 60
+        is_stale = minutes_stale > 15
+    if is_stale:
         st.warning(f"⚠️ Showing the LAST COMPLETE session ({last_bar_ts.strftime('%A, %b %d')}) "
                   "— no live bars yet for today (market not open, or today's data hasn't printed "
                   "yet). This is NOT today's live chart.")
@@ -2679,6 +2730,10 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
         show_vwap = ov1.checkbox("VWAP", value=True, key=f"{key_prefix}_show_vwap_{ticker}")
         show_ema = ov2.checkbox("EMA(50)", value=False, key=f"{key_prefix}_show_ema_{ticker}")
         show_sma = ov3.checkbox("SMA(50)", value=False, key=f"{key_prefix}_show_sma_{ticker}")
+
+    # Fixed chart height (per user request -- the adjustable size control was tried and removed;
+    # this is the midpoint between its old "X-Large" (650) and "XX-Large" (800) presets).
+    chart_px = 725
 
     minutes = {"1m": 1, "5m": 5, "15m": 15, "30m": 30}[tf_choice]
     vwap_1m = det.running_vwap(intraday_df)
@@ -2740,7 +2795,7 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
     html = f"""
 <div id="{chart_id}_legend" style="font-family:ui-monospace,Consolas,monospace;font-size:0.78rem;
      color:#e8ecec;margin-bottom:0.3rem;min-height:1.2em;">Loading…</div>
-<div id="{chart_id}" style="width:100%;height:365px;"></div>
+<div id="{chart_id}" style="width:100%;height:{chart_px}px;"></div>
 <script>{_load_lightweight_charts_js()}</script>
 <script>
 (function() {{
@@ -2917,9 +2972,102 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str):
 }})();
 </script>
 """
-    st.iframe(html, height=395)
+    st.iframe(html, height=chart_px + 30)
     st.caption(f"{tf_choice} candles · {len(cdf)} bars · scroll/pinch to zoom, drag to pan — "
               "price auto-fits the visible range · refreshes every 30s with the rest of this page.")
+
+
+# Fixed display order (per user request): a bull-to-bear spectrum with the two transitional
+# states placed where they conceptually sit, NOT the insertion order zdlog.regime_stats() happens
+# to return (a python dict groupby, effectively arbitrary). INSUFFICIENT DATA is excluded --
+# day_regime() only returns it before enough of today's OWN session has printed, so it's never a
+# meaningful multi-day historical bucket to show outcome stats for.
+_REGIME_OUTCOME_ORDER = ["BULL CONFIRMED", "BULL DEVELOPING", "TREND WEAKENING", "NEUTRAL / CHOP",
+                        "REGIME TRANSITION", "BEAR DEVELOPING", "BEAR CONFIRMED"]
+_REGIME_OUTCOME_HORIZONS = [("fwd_5m", "+5m"), ("fwd_15m", "+15m"), ("fwd_30m", "+30m"),
+                           ("fwd_60m", "+60m"), ("fwd_eod", "+EOD")]
+
+
+def _render_regime_outcome_table(stats: dict):
+    """'What's happened before' headline table (per user request, modeled directly on a proposal
+    the user brought from ChatGPT): for each Day Regime state, how often price was higher some
+    time later, whenever there's a real sample to say so from -- zdlog.regime_stats() already
+    computes exactly this (grouped by the day_regime value active AT SIGNAL TIME, forward-only,
+    same-day-only horizons, see that function's own leakage discipline), this only renders it as a
+    proper table instead of the flat text list it used to be.
+
+    Explicitly does NOT show a percentage for any state/horizon below zdlog.regime_stats()'s own
+    min_sample=30 threshold -- shows an insufficient-sample marker instead, per the user's own
+    instruction not to present conclusions before the sample exists. Collection only started
+    2026-08-15 -- expect most or all cells to read INSUFFICIENT SAMPLE for a while yet; that's
+    correct honesty, not a bug."""
+    # PIIP audit 2026-08 (per user request, same treatment as the Day Regime relationship text):
+    # the methodology paragraph moved from a permanent multi-line caption into a hover tooltip on
+    # the header itself -- only the genuinely at-a-glance fact (the live snapshot count) stays as
+    # a visible caption below the table.
+    _info_header("📊 What's Happened Before — Historical Outcome by State", (
+        "% = positive-return rate at that horizon, only shown once a state/horizon has 30+ "
+        "resolved samples (— otherwise, the sample so far is shown in parentheses). N column is "
+        "the +5m sample size specifically — longer horizons need more elapsed time to resolve "
+        "and always have an equal or smaller sample, shown per-cell when insufficient. Hover any "
+        "percentage for avg/median/range. Forward-only, same-trading-day horizons — never uses "
+        "data from before the observation. This is collection, not a validated edge — a 55%+ or "
+        "45%- reading is colored only to be scannable, not to claim significance."))
+    groups = stats.get("groups") or {}
+    if not stats.get("total_snapshots"):
+        st.caption("No logged snapshots with a recorded price yet — this table fills in as the "
+                  "Signal Calibration Log collects real sessions. Not a bug: collection only "
+                  "started 2026-08-15.")
+        return
+
+    header_cells = "".join(f'<th style="padding:0.4rem 0.6rem;text-align:center;font-size:0.72rem;'
+                           f'color:#8b9a9d;border-bottom:1px solid #232b2d">{label}</th>'
+                           for _, label in _REGIME_OUTCOME_HORIZONS)
+    rows_html = []
+    for state in _REGIME_OUTCOME_ORDER:
+        horizons = groups.get(state)
+        state_color = {"BULL CONFIRMED": "#79ed8e", "BULL DEVELOPING": "#a8e6a1",
+                      "BEAR CONFIRMED": "#ff8080", "BEAR DEVELOPING": "#f5a3a3",
+                      "NEUTRAL / CHOP": "#87d1ff", "TREND WEAKENING": "#fabf6b",
+                      "REGIME TRANSITION": "#fabf6b"}.get(state, "#8b9a9d")
+        # "N" column (per user's mockup) uses the +5m sample -- the largest/most-complete count,
+        # since longer horizons need more elapsed time to resolve and so always have <= that many
+        # observations. Footnote below makes this explicit rather than implying one N applies to
+        # every column.
+        n5 = horizons.get("fwd_5m", {}).get("n", 0) if horizons else 0
+        cells = [f'<td style="padding:0.4rem 0.6rem;text-align:center;font-family:ui-monospace,'
+                f'Consolas,monospace;color:#8b9a9d;font-size:0.8rem">{n5}</td>']
+        for key, _ in _REGIME_OUTCOME_HORIZONS:
+            h = (horizons or {}).get(key)
+            if not h or h.get("status") == "INSUFFICIENT SAMPLE":
+                needed = h.get("min_needed", 30) if h else 30
+                have = h.get("n", 0) if h else 0
+                cells.append(f'<td style="padding:0.4rem 0.6rem;text-align:center;color:#4a5254;'
+                            f'font-size:0.78rem" title="Insufficient sample: {have}/{needed} needed">'
+                            f'— <span style="font-size:0.65rem">({have}/{needed})</span></td>')
+            else:
+                pct = h["positive_rate_pct"]
+                avg_r, med_r, worst_r, best_r, n_r = (h["avg_return_pct"], h["median_return_pct"],
+                                                      h["worst_pct"], h["best_pct"], h["n"])
+                pct_color = "#79ed8e" if pct >= 55 else "#ff8080" if pct <= 45 else "#e8ecec"
+                cells.append(f'<td style="padding:0.4rem 0.6rem;text-align:center;font-weight:700;'
+                            f'color:{pct_color}" title="avg {avg_r:+.3f}% · median '
+                            f'{med_r:+.3f}% · range [{worst_r:+.2f}%, '
+                            f'{best_r:+.2f}%] · N={n_r}">{pct:.0f}%</td>')
+        rows_html.append(
+            f'<tr><td style="padding:0.4rem 0.6rem;font-weight:700;color:{state_color};'
+            f'font-size:0.82rem;white-space:nowrap">{state}</td>{"".join(cells)}</tr>')
+
+    st.markdown(
+        f'<table style="width:100%;border-collapse:collapse;margin:0.4rem 0 0.3rem 0;">'
+        f'<thead><tr><th style="padding:0.4rem 0.6rem;text-align:left;font-size:0.72rem;'
+        f'color:#8b9a9d;border-bottom:1px solid #232b2d">STATE</th>'
+        f'<th style="padding:0.4rem 0.6rem;text-align:center;font-size:0.72rem;color:#8b9a9d;'
+        f'border-bottom:1px solid #232b2d" title="Sample size for the +5m column">N</th>'
+        f'{header_cells}</tr></thead><tbody>{"".join(rows_html)}</tbody></table>',
+        unsafe_allow_html=True)
+    st.caption(f"{stats['total_snapshots']:,} total logged snapshots with a recorded price. "
+              "Hover the header above for methodology.")
 
 
 @st.fragment(run_every=30)
@@ -2939,14 +3087,42 @@ def _render_zero_dte(ticker: str):
     # just a second place to look it up.
     snap = index_snaps.get(ticker) or mega_snaps.get(ticker)
 
-    st.caption(f"⏱️ As of {datetime.now().strftime('%H:%M:%S')} — refreshes every 30s")
+    # PIIP audit 2026-08 (state-architecture review, Phase 7): data-freshness policy, stated
+    # explicitly rather than left implicit. This page's own quote is cached 25s (zd_fetch_intraday/
+    # zd_fetch_daily); Ticker Page/Research/Paper/Screener fetch the SAME underlying tickers
+    # through a SEPARATE, slower 900s cache (load_prices/load_chain) -- confirmed live these can
+    # legitimately disagree by up to 15 minutes if viewed side by side at the same moment. That's
+    # a deliberate tradeoff (unifying every page onto a 25s poll would multiply yfinance request
+    # volume across pages users may have open simultaneously, risking the rate-limiting this
+    # project has already hit before -- see fetch_intraday_batch()'s own docstring), not an
+    # oversight, but it needs to be visible rather than silently assumed.
+    st.caption(f"⏱️ As of {datetime.now().strftime('%H:%M:%S')} — refreshes every 30s. This page's "
+              "own quote is cached ~25s; Ticker Page/Research/Paper use a separate, slower ~15min "
+              "cache for the same tickers, so they may briefly show a different price.")
     if not snap:
         st.warning(f"No live data for {ticker} right now (market closed, or a data gap). "
                    "Try again during market hours.")
         return
 
     breadth = zd.breadth_score(index_snaps, mega_snaps, sector_snaps)
-    health = zd.ticker_health(snap)
+    # PIIP audit 2026-08 (state-architecture review, Phase 3): participation_state() replaces the
+    # old double-counted vote (mega-caps counted individually AND via the sector ETFs that already
+    # contain them) with a 3-bucket (Index/Mega-Cap/Sector) synthesis. breadth_score()'s own raw
+    # green/red counts are unchanged and still shown directly below (sector/mega rows) -- this is
+    # a new interpretation layer on top, not a replacement of the underlying data.
+    participation = zd.participation_state(breadth)
+
+    # Time-of-day-adjusted Relative Volume (PIIP audit 2026-08, Batch 2 / Phase 7; promoted to the
+    # PRIMARY rvol read in the state-architecture review, Phase 4) -- moved earlier in this
+    # function (was computed much later) so ticker_health()/confluence_score() can use it instead
+    # of the cruder full-prior-day-average `rel_volume`, which reads artificially low before the
+    # close. Needs a slower, separately-cached historical fetch (see zd_fetch_historical_5m, 4h
+    # TTL) that can fail independently of the live 1m fetch -- every consumer below falls back to
+    # the old `rel_volume` field automatically when this is unavailable.
+    historical_5m = zd_fetch_historical_5m(ticker)
+    tod_rel_vol = zd.time_of_day_relative_volume(historical_5m, intraday.get(ticker))
+
+    health = zd.ticker_health(snap, tod_rel_vol)
     momentum = zd.momentum_engine(intraday.get(ticker))
     bias = zd.market_bias(snap, breadth, vix_snap)
     sector = zd.sector_health(sector_snaps)
@@ -2984,7 +3160,8 @@ def _render_zero_dte(ticker: str):
         st.session_state[trend_since_key] = datetime.now()
     trend_age_minutes = (datetime.now() - st.session_state[trend_since_key]).total_seconds() / 60
 
-    confluence = zd.confluence_score(bias, breadth, sector, mega, momentum, reversal, snap, alignment)
+    confluence = zd.confluence_score(bias, participation, momentum, reversal, snap, alignment,
+                                     tod_rel_vol)
     prev_day = zd.previous_day_levels(daily.get(ticker))
     or15 = zd.opening_range(intraday.get(ticker), minutes=15)
 
@@ -3015,7 +3192,7 @@ def _render_zero_dte(ticker: str):
     efficiency = zd.trend_efficiency(intraday.get(ticker))
     integrity = zd.trend_integrity(alignment, crossings, efficiency, confluence)
     no_edge_reasons = (zd.no_clear_edge_reasons(bias, confluence, crossings, alignment, reversal)
-                       if bias["recommendation"] == "NO CLEAR EDGE" else [])
+                       if bias["direction_label"] == "No Clear Edge" else [])
     data_quality = zd.data_quality_snapshot(intraday.get(ticker), chain, tf_snapshot)
 
     # Day Regime (PIIP audit 2026-08, Batch 2 / Phase 1) and Timeframe Sequence (Phase 8) -- both
@@ -3023,11 +3200,18 @@ def _render_zero_dte(ticker: str):
     regime = zd.day_regime(trend_state, integrity, alignment, reversal, trend_age_minutes)
     tf_sequence = tf.interpret_timeframe_sequence(tf_snapshot)
 
-    # Time-of-day-adjusted Relative Volume (PIIP audit 2026-08, Batch 2 / Phase 7): needs a
-    # slower, separately-cached historical fetch (see zd_fetch_historical_5m, 4h TTL) -- shown
-    # ALONGSIDE the existing rel_volume proxy in the Levels group, not replacing it.
-    historical_5m = zd_fetch_historical_5m(ticker)
-    tod_rel_vol = zd.time_of_day_relative_volume(historical_5m, intraday.get(ticker))
+    # "What Changed?" detail (PIIP audit 2026-08, state-architecture review, Phase 5) and Market
+    # DNA (day type) -- both moved EARLIER here (were computed further down, after the signal-log
+    # write) per user request to also persist them on every routine 30s snapshot row, not just on
+    # regime-transition rows. Pure reorder of two already-existing, already-cheap computations
+    # (no new network calls, no new logic) -- everything they need (crossings/efficiency/
+    # integrity/participation/alignment/trend_state/trend_age_minutes, and snap/intraday/daily)
+    # was already available by this point in the function.
+    regime_detail = zd.build_regime_detail(tf_snapshot, snap, crossings, integrity, efficiency,
+                                           reversal, participation, alignment=alignment,
+                                           trend_state=trend_state,
+                                           trend_age_minutes=trend_age_minutes)
+    dna = mdna.classify(snap, intraday.get(ticker), daily.get(ticker))
 
     # PIIP audit 2026-08 (accounting pass): gated on Fresh underlying data -- without this, leaving
     # the page open overnight/over a weekend would log the SAME stale closing price every 30s for
@@ -3036,27 +3220,42 @@ def _render_zero_dte(ticker: str):
     # compute_forward_outcomes()/regime_stats() later with fake "0% return over closed-market
     # minutes" data points once real historical depth builds up -- worth fixing now, before it
     # contaminates weeks of collection, not after.
+    #
+    # `day_type`/`state_age_minutes`/`detail` (PIIP audit 2026-08, state-architecture review,
+    # follow-up per user request): now persisted on EVERY logged snapshot, not just regime-
+    # transition rows -- these were already being computed every refresh (regime_detail/dna
+    # above), just not written to the signal log before. Purely additive to the existing `extra`
+    # JSON column (built for exactly this -- "room for fields added later without a schema
+    # migration") -- no new table, no new column, no change to any existing field.
     if data_quality["underlying"] == "Fresh":
         try:
             zdlog.log_signal_snapshot(ticker, bias, confidence, entry, momentum, reversal, alignment,
-                                      trend_state, spot_price=snap["last"], day_regime=regime["state"])
+                                      trend_state, spot_price=snap["last"], day_regime=regime["state"],
+                                      day_type=dna["label"], state_age_minutes=trend_age_minutes,
+                                      detail=regime_detail)
         except Exception:
             pass  # calibration logging is best-effort -- never break the page over a local DB write
 
     # Regime transition timeline (PIIP audit 2026-08, Batch 3 / Phase 9): edge-triggered, only
     # logs when the Day Regime state actually CHANGES since the last read -- same was_alert/
     # is_alert pattern the Exit Quality alert below already uses. Never one row per 30s refresh.
+    # explain_transition() (called at render time in the Regime Timeline section below) diffs
+    # each row's detail against the PRIOR logged row's detail -- i.e. "what was true when we
+    # entered the state we're now leaving" vs. "what's true now" -- which is the decision-relevant
+    # comparison ("why did BULL CONFIRMED become BULL WEAKENING" means vs. when it became
+    # CONFIRMED, not vs. the last noisy 30s tick). Recomputed from stored facts every render,
+    # never stored as a conclusion, so it can't drift from what was measured.
     regime_prev_key = f"zd_regime_prev_{ticker}"
     prev_regime_state = st.session_state.get(regime_prev_key)
     if prev_regime_state is not None and prev_regime_state != regime["state"]:
         try:
             zdlog.log_regime_transition(ticker, prev_regime_state, regime["state"],
-                                        regime["reasons"], regime.get("trend_age_minutes"))
+                                        regime["reasons"], regime.get("trend_age_minutes"),
+                                        detail=regime_detail)
         except Exception:
             pass
     st.session_state[regime_prev_key] = regime["state"]
 
-    dna = mdna.classify(snap, intraday.get(ticker), daily.get(ticker))
     try:
         mdna.log_snapshot(ticker, dna)
     except Exception:
@@ -3103,16 +3302,32 @@ def _render_zero_dte(ticker: str):
                          "not assumed here."]},
         ]},
         {"label": "🌐 Market Context", "rows": [
-            {"label": "Market Bias", "value": bias["recommendation"], "color": _lean_color(bias["recommendation"]),
+            {"label": "Market Bias", "value": bias["direction_label"], "color": _lean_color(bias["direction_label"]),
              "context": f"CALLS {bias['calls_pct']:.0f} / PUTS {bias['puts_pct']:.0f} · "
                         f"{bias['confidence_pct']:.0f}% conf · {bias['environment']}",
              "evidence": [f"{pts:+.1f}  {label}" for label, pts in bias["reasons"].items()]},
+            # PIIP audit 2026-08 (state-architecture review, Phase 3): Participation is the new
+            # top-level row -- the 3-bucket (Index/Mega-Cap/Sector) synthesis that fixed the
+            # double-counting bug, shown FIRST since it's what confluence_score() actually votes
+            # on now. Breadth/Sector/Mega Cap rows below it are unchanged, kept exactly as before
+            # so the raw underlying green/red counts are still fully inspectable.
+            {"label": "Participation", "value": participation["state"],
+             "color": ("#79ed8e" if participation["state"] == "STRONG" else
+                      "#a8e6a1" if participation["state"] == "MODERATE" else
+                      "#fabf6b" if participation["state"] == "WEAK" else
+                      "#ff8080" if participation["state"] == "MIXED" else "#8b9a9d"),
+             "context": (f"Avg {participation['avg_signed']:+.0f} across {participation['n_buckets']} "
+                        "bucket(s)" if participation["avg_signed"] is not None else
+                        "No index/mega-cap/sector data available right now."),
+             "evidence": [f"{name}: {v:+.1f}" if v is not None else f"{name}: —"
+                         for name, v in participation["buckets"].items()] + [participation["note"]]},
             {"label": "Breadth (proxy)", "value": f"{breadth['score_signed']:+.0f} {breadth['label']}",
              "color": _lean_color(breadth["label"]),
              "context": f"Idx {breadth['indices_green']}\U0001f7e2/{breadth['indices_red']}\U0001f534 · "
                         f"Mega {breadth['mega_caps_green']}\U0001f7e2/{breadth['mega_caps_red']}\U0001f534 · "
                         f"Sec {breadth['sectors_green']}\U0001f7e2/{breadth['sectors_red']}\U0001f534",
-             "evidence": [breadth["note"]]},
+             "evidence": [breadth["note"], "Raw underlying counts -- see the 'Participation' row "
+                         "above for the de-duplicated 3-bucket interpretation used in Confluence."]},
             {"label": "Sector Health", "value": f"{sector['overall_confirmation_pct']:.0f}%",
              "color": _score_color(sector["overall_confirmation_pct"]),
              "context": f"{sector['confirming']}/{sector['total']} sectors confirming",
@@ -3165,30 +3380,39 @@ def _render_zero_dte(ticker: str):
              "context": f"{snap['pct_from_vwap']:+.2f}% from VWAP — institutional fair value for the day",
              "evidence": [f"Last: ${snap['last']:.2f}", f"VWAP: ${snap['vwap']:.2f}",
                          f"Distance: {snap['pct_from_vwap']:+.2f}%"]},
+            # PIIP audit 2026-08 (state-architecture review, Phase 4): the time-of-day-adjusted
+            # RVOL is now the PRIMARY row (was second, below the cruder metric) -- it's what
+            # ticker_health()/confluence_score() now actually use for scoring too (see app.py
+            # above), so the displayed default matches what's driving the numbers elsewhere on
+            # this page. Label states exactly what it measures ("vs expected volume by this time
+            # of day"), never implying a plain daily-average comparison it isn't.
             {"label": "Relative Volume",
-             "value": f"{snap['rel_volume']:.2f}x" if snap.get("rel_volume") is not None else "—",
-             "color": ("#79ed8e" if health["volume_label"] == "Strong" else
-                      "#ff8080" if health["volume_label"] == "Light" else "#87d1ff"),
-             "context": f"{health['volume_label']} vs 20-day avg volume (partial-day before the close)",
-             "evidence": [f"Today's volume: {snap['today_volume']:,.0f}",
-                         f"20-day avg: {snap['avg20_volume']:,.0f}" if snap.get("avg20_volume") else "20-day avg: —",
-                         "Reads low before market close — partial-day volume, not time-of-day adjusted."]},
-            {"label": "Relative Volume (time-of-day)",
              "value": f"{tod_rel_vol['ratio']:.2f}x" if tod_rel_vol and tod_rel_vol["ratio"] else "—",
              "color": ("#79ed8e" if tod_rel_vol and tod_rel_vol["ratio"] and tod_rel_vol["ratio"] > 1.3 else
                       "#ff8080" if tod_rel_vol and tod_rel_vol["ratio"] and tod_rel_vol["ratio"] < 0.7 else
                       "#87d1ff" if tod_rel_vol else "#8b9a9d"),
-             "context": (f"vs avg volume by THIS point in the session, {tod_rel_vol['sample_days']} "
-                        f"trading days" if tod_rel_vol else
-                        "Needs a successful historical 5m-bar fetch — see Data Quality."),
-             "evidence": ([f"Actual: {tod_rel_vol['actual_volume']:,.0f}",
-                          f"Expected by now: {tod_rel_vol['expected_volume']:,.0f}",
+             "context": (f"{tod_rel_vol['ratio']:.2f}x vs EXPECTED volume by this point in the "
+                        f"session ({tod_rel_vol['sample_days']} historical trading days)" if tod_rel_vol
+                        else "Needs a successful historical 5m-bar fetch — falling back to the "
+                             "full-day-average row below."),
+             "evidence": ([f"Actual volume so far: {tod_rel_vol['actual_volume']:,.0f}",
+                          f"Expected by now (historical avg): {tod_rel_vol['expected_volume']:,.0f}",
                           f"Method: {tod_rel_vol['method']}",
-                          "The row above (plain 'Relative Volume') compares against a full prior "
-                          "day's average and reads low before the close — this one compares "
-                          "against the historical average AT THIS SAME POINT in the session."]
+                          "Time-of-day-adjusted -- compares against the historical average AT "
+                          "THIS SAME POINT in the session, not a full-day figure, so it doesn't "
+                          "read artificially low before the close."]
                          if tod_rel_vol else ["Historical 5m-bar fetch unavailable right now — "
-                                             "the plain Relative Volume row above still works."])},
+                                             "the full-day-average row below still works."])},
+            {"label": "Relative Volume (full-day avg)",
+             "value": f"{snap['rel_volume']:.2f}x" if snap.get("rel_volume") is not None else "—",
+             "color": ("#79ed8e" if not tod_rel_vol and health["volume_label"] == "Strong" else
+                      "#ff8080" if not tod_rel_vol and health["volume_label"] == "Light" else "#8b9a9d"),
+             "context": "Fallback metric — vs a full prior 20-day average, reads low before the "
+                       "close. The row above (time-of-day-adjusted) is the primary read when available.",
+             "evidence": [f"Today's volume: {snap['today_volume']:,.0f}",
+                         f"20-day avg: {snap['avg20_volume']:,.0f}" if snap.get("avg20_volume") else "20-day avg: —",
+                         "NOT time-of-day adjusted — a 2x reading here at 11am reads the same as "
+                         "2x at 3:45pm even though far less of the day's volume has happened yet."]},
             {"label": "Previous Day",
              "value": f"C ${prev_day['close']:.2f}" if prev_day else "—",
              "color": (("#79ed8e" if snap["last"] >= prev_day["close"] else "#ff8080") if prev_day else "#8b9a9d"),
@@ -3212,15 +3436,27 @@ def _render_zero_dte(ticker: str):
             {"label": f"{ticker} Health", "value": f"{health['score']:.0f}/100", "color": _score_color(health["score"]),
              "context": f"{health['trend_label']} · {health['momentum_label']} · {health['volume_label']}",
              "evidence": [f"{pts:+.1f}  {label}" for label, pts in health["reasons"].items()]},
-            {"label": "Momentum",
+            # PIIP audit 2026-08 (state-architecture review, Phase 6): momentum_engine() reads the
+            # last 5 vs. prior 5 of whatever bars it's given -- 1m bars here, so specifically a
+            # ~5-minute window -- and the label used to just say "Momentum" with the window buried
+            # only in the expanded evidence. Now stated in both the label AND the main context
+            # line, so it can't be mistaken for a longer-window read (see the "5m Momentum" /
+            # "15m Momentum" / etc. rows in the Timeframes & Trend tab below for the LABELED
+            # multi-timeframe versions of this same calculation shape).
+            {"label": "Momentum (~5min)",
              "value": f"{momentum['continuation_score_pct']:.0f}" if momentum else "—",
              "color": _score_color(momentum["continuation_score_pct"]) if momentum else "#8b9a9d",
-             "context": f"{momentum['velocity_label']} · {momentum['acceleration_label']}" if momentum
-                        else "Not enough intraday bars yet.",
-             "evidence": ([f"Velocity: {momentum['velocity_pct']:+.3f}% (last 5 bars)",
-                          f"Acceleration: {momentum['acceleration_pct']:+.3f}% (velocity vs. the 5 bars before that)",
+             "context": (f"{momentum['velocity_label']} · {momentum['acceleration_label']} — "
+                        "last 5 one-minute bars vs. the prior 5" if momentum
+                        else "Not enough intraday bars yet."),
+             "evidence": ([f"Velocity: {momentum['velocity_pct']:+.3f}% (last 5 one-minute bars, ~5 min)",
+                          f"Acceleration: {momentum['acceleration_pct']:+.3f}% (velocity vs. the "
+                          "5 one-minute bars before that, ~5-10 min ago)",
                           "This is a heuristic score, not a calibrated probability — it has not "
-                          "been validated against historical outcomes."]
+                          "been validated against historical outcomes.",
+                          "For longer windows, see 5m/15m/30m/Daily Momentum in the Timeframes & "
+                          "Trend tab — those resample to real 5/15/30-minute bars first, this row "
+                          "does not."]
                          if momentum else ["Needs at least 10 intraday bars — check back once the market's "
                                            "been open a little longer."])},
             {"label": "Reversal Pressure", "value": f"{reversal['reversal_pressure_score']:.0f}",
@@ -3355,17 +3591,35 @@ def _render_zero_dte(ticker: str):
                       "first-pass guess, flagged for calibration once real sessions accumulate in the "
                       "Signal Calibration Log below.")
 
-        st.caption("**How the trend/direction reads relate:** Day Regime above is the headline "
-                  "synthesis. Trade Confidence (below) blends Market Bias + Entry Quality + "
-                  "liquidity into one directional-confidence number. Trend State, Timeframe "
-                  "Sequence, and Market Bias (Timeframes & Trend / Market Context tabs) are the "
-                  "more granular reads Day Regime is built from -- they usually agree; when they "
-                  "don't, that disagreement is itself the signal (see REGIME TRANSITION / TREND "
-                  "WEAKENING / NO CLEAR EDGE above).")
+        # PIIP audit 2026-08 (per user request): was a permanent 13-line paragraph -- collapsed to
+        # a single-line header + bright hover-info icon (_info_header -- the native st.caption
+        # `help=` icon was tried first and confirmed too pale/easy to miss) so the explanation is
+        # still one hover away without permanently eating vertical space on every page load.
+        _info_header("How Day Regime, Market DNA & Trade Confidence relate", (
+            "Market DNA (below) and Day Regime (above) answer two DIFFERENT questions, not the "
+            "same one twice — Market DNA is the day's overall SHAPE (Gap & Go / Trend Day / Chop "
+            "/ Grind / Range Bound), set once it has enough evidence and stable for the session; "
+            "Day Regime is the live DIRECTIONAL STATE right now, which can pass through several "
+            "stages (Developing → Confirmed → Weakening → Confirmed again) within a single Market "
+            "DNA day-type as the intraday trend develops and pulls back. Day Regime is the "
+            "headline synthesis. Trade Confidence (below) blends Market Bias + Entry Quality + "
+            "liquidity into one directional-confidence number. Trend State, Timeframe Sequence, "
+            "and Market Bias (Timeframes & Trend / Market Context tabs) are the more granular "
+            "reads Day Regime is built from — they usually agree; when they don't, that "
+            "disagreement is itself the signal (see REGIME TRANSITION / TREND WEAKENING / NO "
+            "CLEAR EDGE above)."), size="0.85rem")
+
+        # "What's happened before" headline table (per user request): the same
+        # zero_dte_log.regime_stats() data that used to sit behind a manual button in the
+        # diagnostics tab, promoted to a headline table right next to "what this looks like"
+        # (Day Regime above) -- pairs the live read with its own historical outcome record in one
+        # place. 5-min cache (zd_regime_stats), not recomputed every 30s refresh.
+        _render_regime_outcome_table(zd_regime_stats(ticker))
 
         with st.container(border=True):
             st.markdown(f"**📊 Intraday Chart — {ticker}**")
-            _render_intraday_candlestick(ticker, intraday.get(ticker), key_prefix="zd")
+            _render_intraday_candlestick(ticker, intraday.get(ticker), key_prefix="zd",
+                                         data_quality=data_quality)
 
         # ── Hero: the one number worth seeing without scrolling ──
         conf_color = _score_color(confidence["score"])
@@ -3433,17 +3687,17 @@ def _render_zero_dte(ticker: str):
         st.caption("Tap any row to see the evidence behind its number.")
 
         with st.container(border=True):
-            st.subheader("🤖 5-agent AI synthesis (optional, real spend)")
+            _info_header("🤖 5-agent AI synthesis (optional, real spend)", (
+                "5 weighted Claude Haiku calls (News & Catalyst 30% · Technical & Market "
+                "Structure 25% · Options & Positioning 20% · Macro & Cross-Asset 15% · "
+                "Skeptic/Risk 10%), each scoring the signals above from its own focus area. "
+                "The final blend below is CODE-computed from those scores, never invented by "
+                "any single call. Same backtest caveat as Trade Confidence: this is a "
+                "descriptive lean, not a trade recommendation. Real spend, ~$0.03–0.05/run "
+                "(5 calls), governed by a $3/day · $0.15/run · 5-call cap."), size="1.3rem")
             if not os.getenv("ANTHROPIC_API_KEY"):
                 _ai_key_missing_notice()
             else:
-                st.caption("5 weighted Claude Haiku calls (News & Catalyst 30% · Technical & Market "
-                          "Structure 25% · Options & Positioning 20% · Macro & Cross-Asset 15% · "
-                          "Skeptic/Risk 10%), each scoring the signals above from its own focus area. "
-                          "The final blend below is CODE-computed from those scores, never invented by "
-                          "any single call. Same backtest caveat as Trade Confidence: this is a "
-                          "descriptive lean, not a trade recommendation. Real spend, ~$0.03–0.05/run "
-                          "(5 calls), governed by a $3/day · $0.15/run · 5-call cap.")
                 ai_0dte_key = f"ai_0dte_{ticker}"
                 zd_question = st.text_input(
                     "Anything specific you want the agents to consider? (optional)",
@@ -3489,7 +3743,7 @@ def _render_zero_dte(ticker: str):
                                 "trade_confidence": confidence["score"],
                                 "bias_direction": confidence["bias_direction"],
                                 "market_dna": dna["label"],
-                                "market_bias": {"recommendation": bias["recommendation"],
+                                "market_bias": {"direction_label": bias["direction_label"],
                                                "confidence_pct": bias["confidence_pct"],
                                                "environment": bias["environment"]},
                                 "breadth": {"score_signed": breadth["score_signed"], "label": breadth["label"]},
@@ -3757,7 +4011,7 @@ def _render_zero_dte(ticker: str):
                     if is_alert:
                         _render_direction_alert(
                             f"Bias has flipped against your {direction} — now {bias['environment']} "
-                            f"({bias['recommendation']}). Not an auto-exit signal — your call.")
+                            f"({bias['direction_label']}). Not an auto-exit signal — your call.")
                         if not was_alert:
                             st.toast(f"⚠️ {ticker} bias flipped against your {direction}", icon="🚨")
                             st.markdown(f'<audio autoplay src="{_alert_beep_data_uri()}"></audio>',
@@ -3809,47 +4063,56 @@ def _render_zero_dte(ticker: str):
                 # State Timeline (PIIP audit 2026-08, Batch 3 / Phase 9): today's actual Day Regime
                 # transitions, edge-triggered-logged above -- reads back what really happened, never
                 # reconstructs history after the fact.
-                st.markdown("**🕰️ Today's Regime Timeline**")
+                st.markdown("**🕰️ Today's Regime Timeline — What Changed?**")
                 timeline = zdlog.regime_timeline(ticker)
                 if timeline:
-                    for t in timeline:
+                    # PIIP audit 2026-08 (state-architecture review, Phase 5): each row's "why" is
+                    # RECOMPUTED here from the stored detail facts (this row's vs. the prior row's),
+                    # never stored as a conclusion -- explain_transition() only reports measured
+                    # deltas, matching the example format: Primary driver / Supporting changes /
+                    # Higher-timeframe context / a templated (never LLM-invented) interpretation.
+                    for i, t in enumerate(timeline):
                         ts_short = t["ts"].split("T")[-1] if "T" in t["ts"] else t["ts"].split(" ")[-1]
                         reasons_bit = "; ".join(t["reasons"]) if t["reasons"] else ""
                         st.write(f"**{ts_short}** {t['from_state'] or '—'} → {t['to_state']}"
                                 + (f"  \n_{reasons_bit}_" if reasons_bit else ""))
+                        prev_detail = timeline[i - 1]["detail"] if i > 0 else None
+                        if t["detail"] is not None:
+                            explanation = zd.explain_transition(prev_detail, t["detail"],
+                                                                 t["from_state"], t["to_state"],
+                                                                 to_reasons=t["reasons"])
+                            with st.expander("Why?", expanded=False):
+                                if explanation["primary"]:
+                                    st.write(f"**Primary:** {explanation['primary']}")
+                                if explanation["supporting"]:
+                                    st.write("**Supporting:**")
+                                    for s in explanation["supporting"]:
+                                        st.write(f"　• {s}")
+                                if explanation["higher_timeframes"]:
+                                    tf_bits = " · ".join(f"{tf} {d}" for tf, d in
+                                                         explanation["higher_timeframes"].items())
+                                    st.caption(f"Timeframes at this moment: {tf_bits}")
+                                st.write(f"**Interpretation:** {explanation['interpretation']}")
+                                st.caption("Every line above traces back to an actual measured "
+                                          "before/after comparison, stored at the time of each "
+                                          "transition -- never invented after the fact, never "
+                                          "LLM-generated.")
+                        elif i > 0:
+                            st.caption("　(Logged before the detailed What-Changed tracking was "
+                                      "added — only the state change and its own reasons are "
+                                      "available for this row.)")
                 else:
                     st.caption("No regime changes logged yet today — the state has held steady since "
                               "this page started tracking it, or this is the first read of the day.")
 
-                # Historical Regime Stats (PIIP audit 2026-08, Batch 3 / Phases 12-13): on-demand,
-                # NOT auto-computed every 30s refresh (this project's own performance rule -- separate
-                # live state from historical validation, see zero_dte.py module notes). Expect
-                # INSUFFICIENT SAMPLE almost everywhere right now -- collection only started
-                # 2026-08-15, that's correct honesty, not a bug to fix.
-                st.markdown("**📈 Historical Regime Stats**")
-                if st.button("Compute (reads the Signal Calibration Log, may take a moment)",
-                            key=f"zd_regime_stats_btn_{ticker}"):
-                    st.session_state[f"zd_regime_stats_{ticker}"] = zdlog.regime_stats(ticker)
-                stats = st.session_state.get(f"zd_regime_stats_{ticker}")
-                if stats:
-                    if not stats["groups"]:
-                        st.caption(stats["note"])
-                    else:
-                        st.caption(f"{stats['total_snapshots']:,} total logged snapshots with a "
-                                  f"recorded price. {stats['note']}")
-                        for state, horizons in stats["groups"].items():
-                            st.write(f"**{state}**")
-                            for h, s in horizons.items():
-                                if s["status"] == "INSUFFICIENT SAMPLE":
-                                    st.caption(f"　{h}: INSUFFICIENT SAMPLE (N={s['n']}, "
-                                              f"need {s['min_needed']}+)")
-                                else:
-                                    st.write(f"　{h}: N={s['n']} · {s['positive_rate_pct']:.0f}% positive "
-                                            f"· avg {s['avg_return_pct']:+.3f}% · median "
-                                            f"{s['median_return_pct']:+.3f}% · range "
-                                            f"[{s['worst_pct']:+.2f}%, {s['best_pct']:+.2f}%]")
-                else:
-                    st.caption("Not computed yet this session — click the button above.")
+                # Historical Regime Stats (PIIP audit 2026-08, Batch 3 / Phases 12-13; promoted to
+                # a headline table on the Overview tab per user request, state-architecture review
+                # follow-up) -- the manual on-demand button this used to be is gone; the SAME
+                # zd_regime_stats()-cached data (5-min TTL) now renders as "📊 What's Happened
+                # Before" right under the Day Regime banner on Overview, avoiding two different-
+                # looking displays of the same numbers. This pointer replaces the old duplicate.
+                st.caption("**📈 Historical Regime Stats** moved to the Overview tab — see "
+                          "'📊 What's Happened Before' right under the Day Regime banner.")
 
                 # Data Quality panel (PIIP audit 2026-08, Batch 1 / Phase 22): consolidates the
                 # freshness/proxy caveats already scattered across this page's captions into one

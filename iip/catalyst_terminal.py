@@ -13,6 +13,18 @@ orders, etc. — including market-moving statements attributed to any public fig
 included) through ordinary news coverage, not by integrating directly with X/Twitter or Truth
 Social. Those platforms either have no free API (Truth Social) or a free tier too small to be
 useful (X/Twitter, ~1,500 reads/month) — see project chat history for the full reasoning.
+
+Readiness for a future News -> Market Reaction feature (PIIP audit 2026-08, state-architecture
+review, Phase 10 -- explicitly NOT built yet, this is a readiness check only): confirmed the
+existing architecture doesn't block it. `score_and_dedupe()`'s `published` field (below) is
+already a real UTC timestamp per headline, which is the one piece a future before/after price
+comparison would need to anchor on -- combined with the existing intraday bars (already
+timestamped, already fetched every 30s on the 0DTE page) and the point-in-time discipline already
+proven in zero_dte_log.compute_forward_outcomes() (never uses data from before the observation
+timestamp), a "price/trend state before this headline vs. after" comparison is buildable later
+without restructuring anything here. Nothing in this module needs to change to enable it -- it
+would live as a new function reading `published` + the existing intraday frame, same pattern as
+the rest of this codebase's calibration logging.
 """
 from __future__ import annotations
 

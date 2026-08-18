@@ -5,6 +5,26 @@ Pure functions, no network calls — consumes the same intraday/daily frames and
 snapshot already fetched/computed by zero_dte.py's batched download (never fetch here).
 Thresholds are a first-pass guess (spec open question #1), kept in one config dict so they're
 easy to recalibrate once real sessions have been logged, rather than tuned/hardcoded blind.
+
+RELATIONSHIP TO zero_dte.day_regime() (PIIP audit 2026-08, state-architecture review):
+These are two DELIBERATELY separate engines answering two different questions, not duplicates
+to be merged:
+  * Market DNA (this module) answers "WHAT KIND OF DAY IS THIS, SHAPE-WISE?" — Gap & Go, Trend
+    Day, Opening Reversal, High Volatility Chop, Slow Grind, Range Bound. It looks at the WHOLE
+    session so far (gap%, range-vs-ATR, VWAP-side consistency for the full day) and answers a
+    question that's stable once set for the day (a "Trend Day" doesn't stop being a Trend Day
+    because of one choppy 15-minute stretch).
+  * zero_dte.day_regime() answers "WHAT DIRECTIONAL STATE IS THE MARKET IN RIGHT NOW?" — BULL/
+    BEAR DEVELOPING/CONFIRMED, NEUTRAL/CHOP, TREND WEAKENING, REGIME TRANSITION. It's a live,
+    trend-following read (built from timeframe.update_trend_state()'s hysteresis machine) that
+    can and does change several times within a single Market DNA day-type — e.g. a genuine
+    "Trend Day" can pass through BULL DEVELOPING -> BULL CONFIRMED -> TREND WEAKENING -> BULL
+    CONFIRMED again as the intraday trend strengthens/pulls back/resumes, without the day-type
+    label changing at all.
+  * Both are shown together in the UI (Trade Confidence hero shows Market DNA; the Day Regime
+    banner sits above it) with a caption cross-referencing them (see app.py's "How the trend/
+    direction reads relate" caption) — this is the intended final architecture, not an
+    intermediate state waiting to be unified into a third classifier.
 """
 from __future__ import annotations
 
