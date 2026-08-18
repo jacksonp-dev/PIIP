@@ -3110,20 +3110,23 @@ def _render_regime_outcome_table(stats: dict):
               "Hover the header above for methodology.")
 
 
-def _render_premarket_thesis(index_snaps: dict, vix_snap: dict | None, participation: dict,
-                             intraday: dict, daily: dict, alignment: dict, now_et: datetime):
-    """SPY Premarket Thesis (deterministic phase only) -- per the user-approved, ChatGPT-refined
-    spec, see iip/premarket_thesis.py's module docstring for the full hierarchy/handoff/signal-
-    family design. Always about SPY specifically, regardless of which ticker is selected elsewhere
-    on this page (index_snaps already has SPY/QQQ/IWM/DIA fetched from the same batch either way).
+def _compute_premarket_thesis(index_snaps: dict, vix_snap: dict | None, participation: dict,
+                              intraday: dict, daily: dict, alignment: dict, now_et: datetime) -> dict | None:
+    """SPY Premarket Thesis (deterministic phase) -- builds, persists, and checkpoints the
+    thesis. Renders NOTHING itself; see _render_unified_morning_read() for the compact 'Morning
+    Read' card this feeds (per the user's chosen 3-column layout, replacing what used to be 3
+    separately-bordered boxes with a lot of dead space). Always about SPY specifically, regardless
+    of which ticker is selected elsewhere on this page (index_snaps already has SPY/QQQ/IWM/DIA
+    fetched from the same batch either way). See iip/premarket_thesis.py's module docstring for
+    the full hierarchy/handoff/signal-family design.
 
-    PRIMARY only before the intraday alignment engine has real data (or past the 10:00 ET
-    backstop) -- see pt.is_primary(). Past that point this collapses to a small reference
-    expander instead of competing with Day Regime for the top of the page, per the explicit
-    'no indicator soup' hierarchy requirement."""
+    Returns None if SPY's snapshot isn't available yet; otherwise a dict of everything the
+    rendering layer needs: spy_snap, vix_snap, thesis (today's live recompute), original (the
+    immutable row logged once this morning, or None if logging hasn't succeeded yet), primary
+    (whether this should still show as the PRIMARY read per pt.is_primary()), and direction."""
     spy_snap = index_snaps.get("SPY")
     if not spy_snap:
-        return
+        return None
     qqq_snap, iwm_snap, dia_snap = index_snaps.get("QQQ"), index_snaps.get("IWM"), index_snaps.get("DIA")
 
     futures = pt_fetch_futures()
@@ -3172,61 +3175,41 @@ def _render_premarket_thesis(index_snaps: dict, vix_snap: dict | None, participa
             pass
 
     primary = pt.is_primary(now_et, alignment["total"])
-    dir_color = {"Bullish": "#79ed8e", "Bearish": "#ff8080", "Neutral": "#87d1ff"}[direction]
-    dir_emoji = {"Bullish": "🟢", "Bearish": "🔴", "Neutral": "⚪"}[direction]
+    return {"spy_snap": spy_snap, "vix_snap": vix_snap, "thesis": thesis, "original": original,
+           "primary": primary, "direction": direction}
 
-    if not primary:
-        # Archived/reference form once Day Regime has taken over -- still visible (the 10am
-        # checkpoint needs somewhere to show up), just not competing for top-of-page attention.
-        ref = original or thesis
-        ref_dir = ref["market_state"]["direction"]
-        with st.expander(f"📋 This morning's SPY Premarket Thesis: {ref_dir} "
-                         f"{ref['market_state']['confidence']:.0f}/100"):
-            st.caption("Handed off to Day Regime above once real intraday data existed — this is "
-                      "a reference to the morning's original (immutable) read, not a live score.")
-            checkpoints = []
-            try:
-                checkpoints = pt.get_checkpoints("SPY")
-            except Exception:
-                pass
-            for cp in checkpoints:
-                st.write(f"**{cp['label']} checkpoint** — direction: {cp['directional_accuracy']} · "
-                        f"tradeability: {cp['tradeability']} ({cp['tradeability_reason']})")
-            if not checkpoints:
-                st.caption("No checkpoint graded yet (first one fires at 10:00 ET).")
-        _render_premarket_ai_section(spy_snap, vix_snap, original or thesis)
-        return
 
-    with st.container(border=True):
-        _info_header("🧭 SPY Premarket Thesis", (
-            "Deterministic-only for now — direction/confidence/risk from 8 signal families "
-            "(equity/growth/small-cap/defensive/volatility/rates/oil/breadth), each family "
-            "bounded so correlated instruments (SPY+ES, QQQ+NQ, IWM+RTY) don't get counted "
-            "multiple times and inflate confidence artificially. Shown as PRIMARY only until "
-            "Day Regime has real intraday data (or 10:00 ET, whichever comes first) — then this "
-            "becomes a reference note, not the active read. Never a trade signal by itself; see "
-            "Trade Permission below for that distinction."), size="1.3rem")
-        c1, c2, c3 = st.columns(3)
-        c1.markdown(f'<div style="font-size:0.75rem;color:#8b9a9d">DIRECTION</div>'
-                   f'<div style="font-size:1.5rem;font-weight:800;color:{dir_color}">'
-                   f'{dir_emoji} {direction}</div>', unsafe_allow_html=True)
-        c2.markdown(f'<div style="font-size:0.75rem;color:#8b9a9d">CONFIDENCE</div>'
-                   f'<div style="font-size:1.5rem;font-weight:800;color:{_score_color(thesis["market_state"]["confidence"])}">'
-                   f'{thesis["market_state"]["confidence"]:.0f}/100</div>', unsafe_allow_html=True)
-        c3.markdown(f'<div style="font-size:0.75rem;color:#8b9a9d">RISK ENVIRONMENT</div>'
-                   f'<div style="font-size:1.5rem;font-weight:800;color:#e8ecec">'
-                   f'{thesis["risk_environment"]["level"]}</div>', unsafe_allow_html=True)
+def _render_thesis_column(pt_data: dict) -> None:
+    """Compact Premarket Thesis column for the unified 'Morning Read' card -- full detail (Why?/
+    Confirmation/Invalidation while PRIMARY, or logged checkpoints once archived) lives in the
+    expander below, not inline."""
+    thesis, original, primary = pt_data["thesis"], pt_data["original"], pt_data["primary"]
+    ref = original or thesis
+    ref_dir = ref["market_state"]["direction"]
+    dir_color = {"Bullish": "#79ed8e", "Bearish": "#ff8080", "Neutral": "#87d1ff"}[ref_dir]
+    dir_emoji = {"Bullish": "🟢", "Bearish": "🔴", "Neutral": "⚪"}[ref_dir]
 
+    _info_header("🧭 Morning Thesis", (
+        "Deterministic-only — direction/confidence/risk from 8 signal families (equity/growth/"
+        "small-cap/defensive/volatility/rates/oil/breadth), each bounded so correlated "
+        "instruments (SPY+ES, QQQ+NQ, IWM+RTY) don't get counted multiple times and inflate "
+        "confidence artificially. Shown as PRIMARY only until Day Regime has real intraday data "
+        "(or 10:00 ET, whichever comes first) — then this becomes a reference note, not the "
+        "active read. Never a trade signal by itself; see Trade Permission in the detail below. "
+        "Immutable once logged each morning — today's original read never gets silently "
+        "rewritten, even by later refreshes."), size="0.95rem")
+    st.markdown(f'<div style="font-size:1.25rem;font-weight:800;color:{dir_color}">'
+               f'{dir_emoji} {ref_dir}</div>'
+               f'<div style="font-size:0.78rem;color:#8b9a9d">{ref["market_state"]["confidence"]:.0f}/100'
+               f' · {ref["risk_environment"]["level"]}</div>', unsafe_allow_html=True)
+
+    if primary:
         perm = thesis["trade_permission"]
         perm_color = {"WAIT": "#fabf6b", "CALLS_FAVORED": "#79ed8e", "PUTS_FAVORED": "#ff8080",
                      "NO_TRADE": "#8b9a9d"}.get(perm["status"], "#8b9a9d")
-        st.markdown(f'<div style="padding:0.5rem 0.8rem;background:{perm_color}1a;border:1.5px '
-                   f'solid {perm_color};border-radius:8px;margin:0.6rem 0 0.4rem 0">'
-                   f'<b style="color:{perm_color}">Trade Permission: '
-                   f'{perm["status"].replace("_", " ")}</b><br>'
-                   f'<span style="font-size:0.82rem;color:#8b9a9d">{_esc(perm["reason"])}</span>'
-                   f'</div>', unsafe_allow_html=True)
-
+        st.markdown(f'<div style="font-size:0.78rem;color:{perm_color};font-weight:700;'
+                   f'margin:0.3rem 0 0.4rem">{perm["status"].replace("_", " ")}</div>',
+                   unsafe_allow_html=True)
         with st.expander("Why?  ·  Confirmation  ·  Invalidation", expanded=False):
             st.markdown("**Why?** (each row is one bounded signal family, not one ticker)")
             for name, f in thesis["families"].items():
@@ -3247,108 +3230,124 @@ def _render_premarket_thesis(index_snaps: dict, vix_snap: dict | None, participa
             if inval["checks"]:
                 for label, ok in inval["checks"]:
                     st.write(f"{'✓' if ok else '✗'} {label}")
+            st.caption(f"Trade Permission: {perm['status'].replace('_', ' ')} — {_esc(perm['reason'])}")
+    else:
+        checkpoints = []
+        try:
+            checkpoints = pt.get_checkpoints("SPY")
+        except Exception:
+            pass
+        with st.expander(f"{len(checkpoints)} checkpoint(s) logged" if checkpoints else "No checkpoint yet"):
+            st.caption("Handed off to Day Regime once real intraday data existed — this is a "
+                      "reference to the morning's original (immutable) read, not a live score.")
+            for cp in checkpoints:
+                st.write(f"**{cp['label']}** — direction: {cp['directional_accuracy']} · "
+                        f"tradeability: {cp['tradeability']} ({cp['tradeability_reason']})")
+            if not checkpoints:
+                st.caption("First one fires at 10:00 ET.")
 
-        st.caption("The machine calculates, the AI explains — every number above is code-"
-                  "computed, never invented by an LLM. Immutable once logged each morning — "
-                  "today's original read never gets silently rewritten, even by later refreshes.")
 
-    _render_premarket_ai_section(spy_snap, vix_snap, original or thesis)
+def _render_ai_column(pt_data: dict) -> None:
+    """Compact AI Premarket Thesis column for the unified 'Morning Read' card -- the optional,
+    cost-gated AI interpretation layer on top of the (already immutable) original thesis, 7 fixed
+    questions per the ChatGPT-refined spec, ONE call, hard-schema-validated (see
+    iip/premarket_ai.py's own docstring for all 3 guardrails). Always reads from `original` -- the
+    row logged once this morning -- never a live re-fetch, so the frozen snapshot the AI actually
+    sees matches exactly what gets persisted and can be reproduced later. Button/verdict badge
+    stays compact; the full 7-section answer lives in the expander below once answered."""
+    spy_snap, vix_snap = pt_data["spy_snap"], pt_data["vix_snap"]
+    original = pt_data["original"] or pt_data["thesis"]
 
+    _info_header("🧠 AI Premarket Thesis", (
+        "ONE Claude call (optional, real spend, ~$0.006/run) answering 7 fixed questions over "
+        "the deterministic numbers, plus real overnight news (Catalyst Terminal) and two "
+        "SEPARATE historical backtests (never blended). The AI explains and reasons — it never "
+        "recomputes a number, and has no say over Trade Permission, which stays entirely "
+        "code-computed and is shown in the detail below regardless of what the AI concludes. "
+        "Every response is schema-validated before display; a malformed response shows INVALID, "
+        "never a silent best-effort guess."), size="0.95rem")
 
-def _render_premarket_ai_section(spy_snap: dict, vix_snap: dict | None, original: dict) -> None:
-    """The optional, cost-gated AI interpretation layer on top of the (already immutable)
-    original thesis -- 7 fixed questions per the ChatGPT-refined spec, ONE call, hard-schema-
-    validated (see iip/premarket_ai.py's own docstring for all 3 guardrails). Always reads from
-    `original` -- the row logged once this morning -- never a live re-fetch, so the frozen
-    snapshot the AI actually sees matches exactly what gets persisted and can be reproduced
-    later. Renders identically whether the deterministic card above is showing PRIMARY or the
-    archived reference view -- once asked, the AI's answer doesn't disappear when the handoff
-    happens."""
-    with st.container(border=True):
-        _info_header("🧠 AI Premarket Thesis (optional, real spend)", (
-            "ONE Claude call answering 7 fixed questions over the deterministic numbers above, "
-            "plus real overnight news (Catalyst Terminal) and two SEPARATE historical backtests "
-            "(shown separately, never blended). The AI explains and reasons — it never "
-            "recomputes a number, and it has no say over Trade Permission, which stays entirely "
-            "code-computed and is shown below the AI's own read regardless of what it concludes. "
-            "Every response is schema-validated before display; a malformed response shows "
-            "INVALID, never a silent best-effort guess."), size="1.3rem")
-        if not os.getenv("ANTHROPIC_API_KEY"):
-            _ai_key_missing_notice()
-            return
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        st.caption("Add an Anthropic key to unlock — see the sidebar for other AI sections.")
+        return
 
-        ai_output = original.get("_ai_output")
-        direction = original["market_state"]["direction"]
-        risk_level = original["risk_environment"]["level"]
-        # TODAY's own similarity dimensions -- computed from the SAME already-fetched spy_snap/
-        # vix_snap the deterministic thesis itself used, the SAME functions the backtest applies
-        # to every historical day, so "similar to today" actually compares like with like instead
-        # of matching on direction/risk alone (gap_bkt/trend_align/vix_bkt left as None would
-        # silently widen the similarity pool to almost everything, undermining the whole point of
-        # the similarity-ingredients transparency requirement).
-        gap_bkt = pbt.gap_bucket(spy_snap.get("day_change_pct")) if spy_snap else None
-        trend_align = (pbt.trend_alignment(spy_snap.get("last"), (spy_snap.get("tech") or {}).get("sma50"))
-                       if spy_snap else None)
-        vix_bkt = pbt.vix_bucket(vix_snap.get("last")) if vix_snap else None
+    ai_output = original.get("_ai_output")
+    direction = original["market_state"]["direction"]
+    risk_level = original["risk_environment"]["level"]
+    # TODAY's own similarity dimensions -- computed from the SAME already-fetched spy_snap/
+    # vix_snap the deterministic thesis itself used, the SAME functions the backtest applies to
+    # every historical day, so "similar to today" actually compares like with like instead of
+    # matching on direction/risk alone (gap_bkt/trend_align/vix_bkt left as None would silently
+    # widen the similarity pool to almost everything, undermining the whole point of the
+    # similarity-ingredients transparency requirement).
+    gap_bkt = pbt.gap_bucket(spy_snap.get("day_change_pct")) if spy_snap else None
+    trend_align = (pbt.trend_alignment(spy_snap.get("last"), (spy_snap.get("tech") or {}).get("sma50"))
+                   if spy_snap else None)
+    vix_bkt = pbt.vix_bucket(vix_snap.get("last")) if vix_snap else None
 
-        if ai_output is None:
-            if st.button("🧠 Ask AI", key="pt_ai_btn"):
-                with st.spinner("Building snapshot + running historical backtests…"):
-                    try:
-                        releases = get_econ_releases()
-                        tier1 = pt_backtest_tier1(direction, risk_level, gap_bkt, trend_align)
-                        tier2 = pt_backtest_tier2(direction, gap_bkt, trend_align, vix_bkt)
-                        snapshot = pai.build_snapshot(spy_snap, original, releases, tier1, tier2,
-                                                      datetime.now(ZoneInfo("America/New_York")))
-                        client = agents.LLMClient(dry_run=False)
-                        result = pai.ask_ai_thesis(snapshot, client)
-                        methodology_version = tier1.get("methodology_version") or pbt.METHODOLOGY_VERSION
-                        pt.log_thesis_ai_output("SPY", snapshot, result, methodology_version)
-                        if result["_valid"]:
-                            st.toast(f"AI thesis done — ${result.get('_cost', 0):.4f} spent.")
-                        else:
-                            st.toast("AI response failed validation — see below.")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"AI call failed: {e}")
-            return
+    if ai_output is None:
+        if st.button("🧠 Ask AI", key="pt_ai_btn"):
+            with st.spinner("Building snapshot + running historical backtests…"):
+                try:
+                    releases = get_econ_releases()
+                    tier1 = pt_backtest_tier1(direction, risk_level, gap_bkt, trend_align)
+                    tier2 = pt_backtest_tier2(direction, gap_bkt, trend_align, vix_bkt)
+                    snapshot = pai.build_snapshot(spy_snap, original, releases, tier1, tier2,
+                                                  datetime.now(ZoneInfo("America/New_York")))
+                    client = agents.LLMClient(dry_run=False)
+                    result = pai.ask_ai_thesis(snapshot, client)
+                    methodology_version = tier1.get("methodology_version") or pbt.METHODOLOGY_VERSION
+                    pt.log_thesis_ai_output("SPY", snapshot, result, methodology_version)
+                    if result["_valid"]:
+                        st.toast(f"AI thesis done — ${result.get('_cost', 0):.4f} spent.")
+                    else:
+                        st.toast("AI response failed validation — see below.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"AI call failed: {e}")
+        return
 
-        # Already answered this morning -- render the immutable stored result, never re-call.
-        if not ai_output.get("_valid"):
-            st.error(f"AI Thesis: INVALID RESPONSE — {ai_output.get('_reason', 'unknown')}")
+    # Already answered this morning -- render the immutable stored result, never re-call.
+    if not ai_output.get("_valid"):
+        st.markdown('<div style="font-size:1.1rem;font-weight:800;color:#ff8080">INVALID</div>',
+                   unsafe_allow_html=True)
+        with st.expander("Why?"):
+            st.caption(ai_output.get("_reason", "unknown"))
             if ai_output.get("_dry_run"):
                 st.caption("(Dry-run mode — PIIP_LIVE_LLM isn't set to 1, so no real call was made.)")
-            return
+        return
 
-        synth = ai_output["synthesis"]
-        verdict_color = {"SUPPORTS": "#79ed8e", "CONTRADICTS": "#ff8080",
-                        "MIXED": "#fabf6b", "INSUFFICIENT": "#8b9a9d"}.get(synth["verdict"], "#8b9a9d")
-        st.markdown(f'<div style="padding:0.5rem 0.8rem;background:{verdict_color}1a;border:1.5px '
-                   f'solid {verdict_color};border-radius:8px;margin-bottom:0.6rem">'
-                   f'<b style="color:{verdict_color}">Evidence {_esc(synth["verdict"])}</b><br>'
-                   f'<span style="font-size:0.88rem;color:#e8ecec">{_esc(synth["analysis"])}</span>'
-                   f'</div>', unsafe_allow_html=True)
+    synth = ai_output["synthesis"]
+    verdict_color = {"SUPPORTS": "#79ed8e", "CONTRADICTS": "#ff8080",
+                    "MIXED": "#fabf6b", "INSUFFICIENT": "#8b9a9d"}.get(synth["verdict"], "#8b9a9d")
+    st.markdown(f'<div style="font-size:1.25rem;font-weight:800;color:{verdict_color}">'
+               f'{_esc(synth["verdict"])}</div>'
+               f'<div style="font-size:0.78rem;color:#8b9a9d">${ai_output.get("_cost", 0):.4f} spent</div>',
+               unsafe_allow_html=True)
+
+    with st.expander("Full AI read"):
+        st.write(synth["analysis"])
         st.markdown(f"**Failure mode:** {_esc(synth['failure_mode'])}")
 
         for label, key in [("Trend Context", "trend_context"), ("Signal Conviction", "signal_conviction"),
                           ("Risk Environment (AI read)", "risk_environment"),
                           ("Catalyst Risk", "catalyst_risk"), ("Overnight News", "overnight_news"),
                           ("Historical Evidence", "historical_evidence")]:
-            with st.expander(label):
-                st.write(ai_output[key]["analysis"])
+            st.markdown(f"**{label}**")
+            st.write(ai_output[key]["analysis"])
 
         # Historical similarity ingredients -- shown explicitly per the "audit why a day was
         # classified as similar" requirement, never just the HIGH/MEDIUM/LOW label alone.
         snap = original.get("_ai_snapshot") or {}
-        with st.expander("Historical similarity ingredients"):
-            for tlabel, tier in (("Tier 1 (intraday, ~60d)", snap.get("historical_tier1") or {}),
-                                 ("Tier 2 (daily proxy, ~2y)", snap.get("historical_tier2") or {})):
-                st.markdown(f"**{tlabel}** — {tier.get('similarity_label', 'N/A')}, "
-                           f"N={tier.get('n', 0)}, methodology {tier.get('methodology_version', '?')}")
-                for dim, val in (tier.get("similarity_ingredients") or {}).items():
-                    if dim in ("min_dims_matched", "of_dims"):
-                        continue
-                    st.write(f"· {dim.replace('_', ' ').title()}: {val}")
+        st.markdown("**Historical similarity ingredients**")
+        for tlabel, tier in (("Tier 1 (intraday, ~60d)", snap.get("historical_tier1") or {}),
+                             ("Tier 2 (daily proxy, ~2y)", snap.get("historical_tier2") or {})):
+            st.markdown(f"*{tlabel}* — {tier.get('similarity_label', 'N/A')}, "
+                       f"N={tier.get('n', 0)}, methodology {tier.get('methodology_version', '?')}")
+            for dim, val in (tier.get("similarity_ingredients") or {}).items():
+                if dim in ("min_dims_matched", "of_dims"):
+                    continue
+                st.write(f"· {dim.replace('_', ' ').title()}: {val}")
 
         # Trade State -- ALWAYS from the deterministic engine, never restated by the AI (the
         # validator actively rejects a response that tries to include one of its own).
@@ -3359,6 +3358,46 @@ def _render_premarket_ai_section(spy_snap: dict, vix_snap: dict | None, original
                    f'solid {perm_color};border-radius:6px;margin-top:0.5rem;font-size:0.85rem">'
                    f'<b style="color:{perm_color}">Trade State (deterministic, not the AI): '
                    f'{perm["status"].replace("_", " ")}</b></div>', unsafe_allow_html=True)
+
+
+def _render_regime_column(regime: dict, ticker: str) -> None:
+    """Compact Day Regime column for the unified 'Morning Read' card -- "what kind of trading
+    environment is this right now," reasons live in the expander below."""
+    regime_colors = {"BULL CONFIRMED": "#79ed8e", "BULL DEVELOPING": "#a8e6a1",
+                     "BEAR CONFIRMED": "#ff8080", "BEAR DEVELOPING": "#f5a3a3",
+                     "NEUTRAL / CHOP": "#87d1ff", "TREND WEAKENING": "#fabf6b",
+                     "REGIME TRANSITION": "#fabf6b", "INSUFFICIENT DATA": "#8b9a9d"}
+    regime_color = regime_colors.get(regime["state"], "#8b9a9d")
+    _info_header(f"📍 Day Regime — {ticker}", (
+        "The live directional state right now, synthesized from Trend State (iip/timeframe.py) "
+        "+ Trend Integrity — a reuse of signals already computed elsewhere on this page, not a "
+        "new independent read. Thresholds (10 min / 50 integrity / 40 integrity / 60 reversal "
+        "pressure) are a first-pass guess, flagged for calibration once real sessions accumulate "
+        "in the Signal Calibration Log below."), size="0.95rem")
+    age = f'{regime["trend_age_minutes"]:.0f} min old' if regime.get("trend_age_minutes") else " "
+    st.markdown(f'<div style="font-size:1.25rem;font-weight:800;color:{regime_color}">'
+               f'{regime["state"]}</div>'
+               f'<div style="font-size:0.78rem;color:#8b9a9d">{age}</div>', unsafe_allow_html=True)
+    with st.expander("Why this regime?", expanded=False):
+        for r in regime["reasons"]:
+            st.write(f"• {r}")
+
+
+def _render_unified_morning_read(pt_data: dict | None, regime: dict, ticker: str) -> None:
+    """The 'Morning Read' card -- Premarket Thesis / AI Premarket Thesis / Day Regime side by
+    side as one instrument panel, per the user's chosen layout (Option C from the reviewed
+    mockups) -- replacing what used to be 3 separately-bordered boxes, each with its own
+    header/border eating vertical space and the AI box mostly empty before it's ever asked. Each
+    column stays compact; full detail is one click away in that column's own expander."""
+    with st.container(border=True):
+        col1, col2, col3 = st.columns(3)
+        if pt_data:
+            with col1:
+                _render_thesis_column(pt_data)
+            with col2:
+                _render_ai_column(pt_data)
+        with col3:
+            _render_regime_column(regime, ticker)
 
 
 @st.fragment(run_every=30)
@@ -3860,37 +3899,15 @@ def _render_zero_dte(ticker: str):
          "Macro & Diagnostics"])
 
     with tab_overview:
-        # SPY Premarket Thesis (PIIP audit 2026-08, deterministic phase, per user-approved spec):
-        # rendered FIRST, above Day Regime -- it's specifically the read for BEFORE Day Regime can
-        # say anything, so it has to sit above it, not below. Hands itself off (collapses to a
-        # small reference expander) once real intraday data exists -- see pt.is_primary().
-        _render_premarket_thesis(index_snaps, vix_snap, participation, intraday, daily, alignment,
-                                 datetime.now(ZoneInfo("America/New_York")))
-
-        # Day Regime (PIIP audit 2026-08, Batch 2 / Phase 1 + Phase 27): "what kind of day is this"
-        # answered FIRST, above Trade Confidence -- your own spec's own UI-priority mockup put this at
-        # the very top of the page, before any single-number score.
-        regime_colors = {"BULL CONFIRMED": "#79ed8e", "BULL DEVELOPING": "#a8e6a1",
-                         "BEAR CONFIRMED": "#ff8080", "BEAR DEVELOPING": "#f5a3a3",
-                         "NEUTRAL / CHOP": "#87d1ff", "TREND WEAKENING": "#fabf6b",
-                         "REGIME TRANSITION": "#fabf6b", "INSUFFICIENT DATA": "#8b9a9d"}
-        regime_color = regime_colors.get(regime["state"], "#8b9a9d")
-        st.markdown(f'<div style="padding:0.5rem 0.9rem;background:{regime_color}22;border:1.5px '
-                   f'solid {regime_color};border-radius:8px;margin-bottom:0.5rem;">'
-                   f'<span style="font-size:0.75rem;color:#8b9a9d;letter-spacing:0.05em">'
-                   f'DAY REGIME — {ticker}</span><br>'
-                   f'<span style="font-size:1.4rem;font-weight:800;color:{regime_color}">'
-                   f'{regime["state"]}</span>'
-                   f'{f" · {regime['trend_age_minutes']:.0f} min" if regime.get("trend_age_minutes") else ""}'
-                   f'</div>', unsafe_allow_html=True)
-        with st.expander("Why this regime?", expanded=False):
-            for r in regime["reasons"]:
-                st.write(f"• {r}")
-            st.caption("Synthesizes Trend State (iip/timeframe.py) + Trend Integrity — a reuse of "
-                      "signals already computed elsewhere on this page, not a new independent read. "
-                      "Thresholds (10 min / 50 integrity / 40 integrity / 60 reversal pressure) are a "
-                      "first-pass guess, flagged for calibration once real sessions accumulate in the "
-                      "Signal Calibration Log below.")
+        # Morning Read (PIIP audit 2026-08): Premarket Thesis / AI Premarket Thesis / Day Regime
+        # side by side as one unified card, per the user's chosen layout after reviewing 3 mockup
+        # options -- these 3 answer sequential "what's the read right now" questions (before Day
+        # Regime has data / AI's take on the same data / the live intraday regime once it does),
+        # so they read as one instrument panel rather than 3 separately-bordered boxes stacked
+        # with a lot of dead space (the AI box in particular was mostly empty before ever asked).
+        pt_data = _compute_premarket_thesis(index_snaps, vix_snap, participation, intraday, daily,
+                                            alignment, datetime.now(ZoneInfo("America/New_York")))
+        _render_unified_morning_read(pt_data, regime, ticker)
 
         # PIIP audit 2026-08 (per user request): was a permanent 13-line paragraph -- collapsed to
         # a single-line header + bright hover-info icon (_info_header -- the native st.caption
