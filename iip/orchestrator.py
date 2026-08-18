@@ -13,7 +13,7 @@ def research(ticker: str, horizons=(7, 30, 90), use_llm: bool = False,
              db: str = pred.DB_PATH, budget=None, dry_run: bool | None = None) -> dict:
     pred.init_db(db)
     prices = data.get_prices(ticker, period="2y")
-    spot = float(prices["Close"].iloc[-1])
+    spot = data.last_valid_close(prices)
 
     chains, det_fcs, logged = {}, {}, []
     for H in horizons:

@@ -195,7 +195,7 @@ def cheapest_within_move(spot: float, chain: dict, em_abs: float | None) -> dict
 
 def scan_ticker(tk: str) -> dict:
     prices = data.get_prices(tk, "1y")
-    spot = float(prices["Close"].iloc[-1])
+    spot = data.last_valid_close(prices)
     exp30 = data.nearest_expiry(tk, 30)                  # the ~30d research horizon (card + chain agree on it)
     chain = data.get_option_chain(tk, exp30)
     om = det.option_metrics(spot, chain)

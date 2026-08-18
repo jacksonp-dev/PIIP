@@ -64,10 +64,10 @@ THRESHOLDS = {
 
 
 def _yesterday_close(daily: pd.DataFrame) -> float | None:
-    prior = daily[daily.index.date < date.today()]
+    prior = daily[daily.index.date < date.today()]["Close"].dropna()
     if prior.empty:
         return None
-    return float(prior["Close"].iloc[-1])
+    return float(prior.iloc[-1])
 
 
 def _rolling_vwap_side_consistency(intraday: pd.DataFrame) -> float | None:

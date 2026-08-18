@@ -36,9 +36,24 @@ def get_prices(ticker: str, period: str = "2y", interval: str = "1d") -> pd.Data
     return df
 
 
+def last_valid_close(df: pd.DataFrame) -> float | None:
+    """Last non-NaN Close. yfinance occasionally appends a trailing daily row (most recent
+    session) with all-NaN OHLC before that session's data is fully available upstream --
+    blindly taking .iloc[-1] on such a row propagates NaN into every downstream spot-price
+    calc (crashes ATM option lookups, silently breaks % change math). None if there's no
+    valid close at all."""
+    if df is None or df.empty:
+        return None
+    s = df["Close"].dropna()
+    return float(s.iloc[-1]) if len(s) else None
+
+
 def get_spot(ticker: str) -> float:
-    """Most recent close as the working spot price."""
-    return float(get_prices(ticker, period="5d")["Close"].iloc[-1])
+    """Most recent valid close as the working spot price."""
+    spot = last_valid_close(get_prices(ticker, period="5d"))
+    if spot is None:
+        raise ValueError(f"No valid close price for {ticker!r}")
+    return spot
 
 
 def get_intraday(ticker: str, interval: str = "5m", period: str = "1d") -> pd.DataFrame | None:

@@ -127,7 +127,7 @@ def quick_flags(card: dict) -> dict:
 def full(ticker: str) -> dict:
     """Everything for the detail modal: all flags (incl. earnings + analyst) + supporting data."""
     prices = data.get_prices(ticker, "1y")
-    spot = float(prices["Close"].iloc[-1])
+    spot = data.last_valid_close(prices)
     tech = det.technical_metrics(prices)
     chain = data.get_option_chain(ticker, data.nearest_expiry(ticker, 30))
     om = det.option_metrics(spot, chain)

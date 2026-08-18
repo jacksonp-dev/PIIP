@@ -401,7 +401,7 @@ def dossier(ticker: str) -> dict:
     except Exception:
         info = {}
     prices = data.get_prices(ticker, "1y")
-    spot = float(prices["Close"].iloc[-1])
+    spot = data.last_valid_close(prices)
     sector = (info.get("sector") or "")
     industry = (info.get("industry") or "")
     is_biotech = "Healthcare" in sector or any(

@@ -92,7 +92,8 @@ def yield_curve_snapshot(batch: dict[str, pd.DataFrame] | None = None) -> dict:
     out = {}
     for label, tk in YIELD_TICKERS.items():
         df = batch.get(tk)
-        out[label] = float(df["Close"].iloc[-1]) if df is not None and not df.empty else None
+        c = df["Close"].dropna() if df is not None else None
+        out[label] = float(c.iloc[-1]) if c is not None and len(c) else None
     if out.get("13W") is not None and out.get("10Y") is not None:
         out["spread_13w_10y"] = round(out["10Y"] - out["13W"], 3)
     else:
