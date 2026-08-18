@@ -110,9 +110,10 @@ def _info_header(label: str, tooltip: str, size: str = "0.95rem",
     NVDA RS "In-line", etc.) -- pass a different bright platform color (e.g. #79ed8e green,
     #fabf6b amber) to match a specific section's own accent instead."""
     safe_tooltip = _esc(tooltip).replace('"', "&quot;")
+    safe_label = _esc(label)
     st.markdown(
         f'<div style="display:flex;align-items:center;gap:0.45rem;margin:0.1rem 0 0.2rem 0">'
-        f'<span style="font-weight:700;font-size:{size}">{label}</span>'
+        f'<span style="font-weight:700;font-size:{size}">{safe_label}</span>'
         f'<span title="{safe_tooltip}" style="display:inline-flex;align-items:center;'
         f'justify-content:center;width:1.15rem;height:1.15rem;border-radius:50%;flex-shrink:0;'
         f'background:{color};color:#0a0f10;font-size:0.72rem;font-weight:900;cursor:help;'
@@ -1974,9 +1975,11 @@ def _render_watchlist_table(watched: list[dict]):
 
 # ─────────────────────────── Watchlist ───────────────────────────
 if nav == "Watchlist":
-    st.caption("Tickers you're tracking but don't (necessarily) own. Free data only — price/day "
-               "change (Yahoo Finance), next catalyst (same lookup Reddit Momentum uses), Reddit "
-               "buzz (ApeWisdom, all 6 tracked subreddits) — nothing paid, nothing fabricated.")
+    _info_header("⭐ Watchlist", (
+        "Tickers you're tracking but don't (necessarily) own. Free data only — price/day "
+        "change (Yahoo Finance), next catalyst (same lookup Reddit Momentum uses), Reddit "
+        "buzz (ApeWisdom, all 6 tracked subreddits) — nothing paid, nothing fabricated."),
+        size="1.3rem")
     with st.form("wl_add_form", clear_on_submit=True):
         ac1, ac2 = st.columns([4, 1])
         add_tk = ac1.text_input("Add ticker", placeholder="Add a ticker (e.g. AAPL)",
@@ -2110,11 +2113,11 @@ def _render_screener():
     be an instant local re-filter of already-fetched results). The Scan button lives in here too,
     not just the filters -- scanning doesn't need to affect anything outside this page, so there's
     no reason for it to be a full-app rerun either."""
-    st.caption("Screens the real S&P 500 (free — Wikipedia's own maintained constituent table, "
-               "no paid data, no fabricated universe) plus the major index/sector ETFs (SPY, "
-               "QQQ, IWM, DIA, and the 10 SPDR sector funds) by price and today's % move. "
-               "Batched requests, not one-per-ticker — a full scan is a handful of network "
-               "calls, not 500+.")
+    _info_header("🧮 Screener", (
+        "Screens the real S&P 500 (free — Wikipedia's own maintained constituent table, no "
+        "paid data, no fabricated universe) plus the major index/sector ETFs (SPY, QQQ, IWM, "
+        "DIA, and the 10 SPDR sector funds) by price and today's % move. Batched requests, "
+        "not one-per-ticker — a full scan is a handful of network calls, not 500+."), size="1.3rem")
     # Narrow columns + a trailing spacer, not st.columns(3) -- on a wide layout page, 3 equal
     # columns each stretch a 2-3-digit number_input to a third of the full browser width (confirmed
     # from a live screenshot: gigantic dark boxes around tiny numbers). Grouping (min/max price,
@@ -2223,9 +2226,10 @@ if nav == "Screener":
 
 # ─────────────────────────── Opportunity Feed ───────────────────────────
 if nav == "Feed":
-    st.caption("Ranked by the options market's **expected move (~30d)** — the honest read of "
-               "'about to move big, in either direction.' News is context, not the ranking. "
-               "You pick call or put; the **Scorecard** tracks how each decision plays out.")
+    _info_header("📰 Feed", (
+        "Ranked by the options market's expected move (~30d) — the honest read of 'about to "
+        "move big, in either direction.' News is context, not the ranking. You pick call or "
+        "put; the Scorecard tracks how each decision plays out."), size="1.3rem")
     wsb = get_wsb()
 
     # Narrow columns + a trailing spacer, not st.columns(3) -- same fix as the Screener's filter
@@ -2323,21 +2327,23 @@ if nav == "Feed":
                     '</div>', unsafe_allow_html=True)
                 if st.button("Details ▸", key=f"details_{c['ticker']}", width="stretch"):
                     stock_detail_dialog(c["ticker"])
-    st.caption("**#rank = by expected move (biggest mover first).** The **catalyst tag** says whether the "
-               "volatility has a *reason*: 🟢 dated event (earnings) ahead · 🟡 unexplained rich IV "
-               "(expensive noise unless *you* know a catalyst) · ⚪ nothing scheduled. It flags what's "
-               "worth *researching* — **not** who wins (direction is ~a coin flip). 'Alignment' = how "
-               "strongly the mechanical flags agree, also NOT a win probability. **'Cheapest sensible "
-               "entry'** = least capital for a within-move (non-lottery) strike near ~30d; use the "
-               "💵 toggle to hide cards your budget can't reach.")
+    _info_header("ℹ️ Card legend", (
+        "#rank = by expected move (biggest mover first). The catalyst tag says whether the "
+        "volatility has a reason: 🟢 dated event (earnings) ahead · 🟡 unexplained rich IV "
+        "(expensive noise unless you know a catalyst) · ⚪ nothing scheduled. It flags what's "
+        "worth researching — not who wins (direction is ~a coin flip). 'Alignment' = how "
+        "strongly the mechanical flags agree, also NOT a win probability. 'Cheapest sensible "
+        "entry' = least capital for a within-move (non-lottery) strike near ~30d; use the "
+        "💵 toggle to hide cards your budget can't reach."), size="0.85rem")
 
 # ─────────────────────────── Reddit Momentum ───────────────────────────
 if nav == "Reddit Momentum":
-    st.caption("**NOT a stock picker.** Detects unusually fast Reddit-discussion increases across "
-               "6 subreddits (free, no key), scores momentum from real mention/rank data only, and "
-               "points anything worth a look at the existing 🔭 Ticker Page / Deep Research tools for "
-               "the 'is this real' step. No AI post-reading, no fabricated backtests — everything "
-               "here is either live data or math on that data.")
+    _info_header("🔥 Reddit Momentum — not a stock picker", (
+        "Detects unusually fast Reddit-discussion increases across 6 subreddits (free, no "
+        "key), scores momentum from real mention/rank data only, and points anything worth a "
+        "look at the existing 🔭 Ticker Page / Deep Research tools for the 'is this real' "
+        "step. No AI post-reading, no fabricated backtests — everything here is either live "
+        "data or math on that data."), size="1.3rem")
 
     with st.expander("🔥 Trending across Reddit (r/wallstreetbets, r/stocks, r/investing, r/options, "
                      "r/pennystocks, r/StockMarket) — context, NOT a signal"):
@@ -2423,13 +2429,14 @@ if nav == "Reddit Momentum":
             })
         _render_list_view([{"label": f"🔥 REDDIT MOMENTUM — sorted by {sort_by.lower()}", "rows": rows}],
                           container_key="rm_list_rows")
-        st.caption("**Momentum Score** is built only from real mention counts, rank, and "
-                   "cross-subreddit spread — it is NOT a win-rate signal. Context line shows "
-                   "**Catalyst-linked** (a known dated event lines up with the spike) vs "
-                   "**Unexplained**/**Unconfirmed** (high momentum, no known reason found yet — "
-                   "could be real, could be pure hype). Every scan is logged and graded later in "
-                   "the 🎯 Scorecard so you can see, honestly, whether Reddit momentum has "
-                   "actually meant anything. Tap a row for detail and a research shortcut.")
+        _info_header("ℹ️ How Momentum Score works", (
+            "Momentum Score is built only from real mention counts, rank, and cross-subreddit "
+            "spread — it is NOT a win-rate signal. Context line shows Catalyst-linked (a known "
+            "dated event lines up with the spike) vs Unexplained/Unconfirmed (high momentum, "
+            "no known reason found yet — could be real, could be pure hype). Every scan is "
+            "logged and graded later in the 🎯 Scorecard so you can see, honestly, whether "
+            "Reddit momentum has actually meant anything. Tap a row for detail and a research "
+            "shortcut."), size="0.85rem")
 
 
 # ─────────────────────────── Catalyst Terminal ───────────────────────────
@@ -3633,11 +3640,13 @@ def _render_zero_dte(ticker: str):
                             unsafe_allow_html=True)
                 dna_line = "Insufficient evidence" if dna["label"] == "Insufficient Evidence" else dna["label"]
                 st.caption(f"Market DNA: **{dna_line}** — {dna['note']}")
-                st.caption("⚠️ Backtested Jul 2023–2026 (546 days, reusing this exact scoring code): "
-                          "even the highest-confidence bucket hit ~57% next-day directional accuracy — "
-                          "statistically indistinguishable from SPY's own 57.3% base rate over the same "
-                          "period. This score has not been shown to beat the market's baseline. Treat it "
-                          "as an internal-agreement heuristic, not a track record.")
+                _info_header("⚠️ Not proven to beat the market — hover for the backtest", (
+                    "Backtested Jul 2023–2026 (546 days, reusing this exact scoring code): even "
+                    "the highest-confidence bucket hit ~57% next-day directional accuracy — "
+                    "statistically indistinguishable from SPY's own 57.3% base rate over the same "
+                    "period. This score has not been shown to beat the market's baseline. Treat it "
+                    "as an internal-agreement heuristic, not a track record."),
+                    size="0.8rem", color="#fabf6b")
                 # NO CLEAR EDGE (PIIP audit 2026-08, Batch 1 / Phase 21): a first-class, EXPLAINED
                 # outcome -- only renders when Market Bias itself has no real lean, and only shows
                 # reasons already computed elsewhere on the page, never a new judgment.
@@ -4269,9 +4278,10 @@ if nav == "Lottery":
     lotto_days = st.selectbox("Timeline (short = fast & cheap but brutal theta · long = more time, pricier)",
                               [7, 14, 30, 60, 90, 180], index=4, format_func=lambda d: f"~{d} days",
                               key="lotto_days")
-    st.caption(f"Biggest expected-move names first. Each is a ~2×-expected-move OTM contract expiring "
-               f"~{lotto_days}d out. **P(profit) is deliberately tiny — that's the whole point.** "
-               "Left to chance; sized as a burned ticket.")
+    _info_header(f"🎰 Lottery — ~{lotto_days}d contracts", (
+        "Biggest expected-move names first. Each is a ~2×-expected-move OTM contract "
+        "expiring in the selected window. P(profit) is deliberately tiny — that's the whole "
+        "point. Left to chance; sized as a burned ticket."), size="1.1rem", color="#fabf6b")
     wsb_lotto = get_wsb()
     for c in lotto_cards[:8]:
         try:
@@ -4356,10 +4366,10 @@ if nav == "Paper":
     # Caption reads the account's REAL start_cash, not a hardcoded "$1,000", so it stays accurate
     # after someone resets with a different amount.
     _paper_start = _fetch_paper_summary()["start"]
-    st.caption(f"Your **${_paper_start:,.0f} paper options account**. Every trade is saved to disk "
-              "(`iip.db`) and survives a crash or restart. Fills at mid-price, no commission — real "
-              "trading pays the bid-ask spread + fees, so treat results as optimistic. Open "
-              "positions marked live.")
+    _info_header(f"💰 Paper — ${_paper_start:,.0f} account", (
+        "Every trade is saved to disk (iip.db) and survives a crash or restart. Fills at "
+        "mid-price, no commission — real trading pays the bid-ask spread + fees, so treat "
+        "results as optimistic. Open positions marked live."), size="1.3rem")
     btns = st.columns([1, 1, 4])
     if btns[0].button("🔄 Refresh prices"):
         st.session_state["paper_stale"] = True
@@ -4419,15 +4429,15 @@ if nav == "Paper":
             st.metric("Realized P&L (all closed trades)", f"${s['realized_pnl']:+,.0f}")
 
         with st.container(border=True):
-            st.subheader("🤖 AI opinion on how you're doing (optional, real spend)")
+            _info_header("🤖 AI opinion on how you're doing (optional, real spend)", (
+                "One Claude Haiku call that reads your actual equity, P&L, open positions, "
+                "and recent closed trades — plain-English coaching commentary, not a trade "
+                "recommendation. Never invents numbers; reasons only from the account state "
+                "above. Real spend, ~$0.01/run, same cost caps as the Research page's AI "
+                "section."), size="1.3rem")
             if not os.getenv("ANTHROPIC_API_KEY"):
                 _ai_key_missing_notice()
             else:
-                st.caption("One Claude Haiku call that reads your **actual** equity, P&L, open "
-                          "positions, and recent closed trades — plain-English coaching "
-                          "commentary, not a trade recommendation. Never invents numbers; reasons "
-                          "only from the account state above. Real spend, ~$0.01/run, same cost "
-                          "caps as the Research page's AI section.")
                 pf_question = st.text_input(
                     "Anything specific you want the agent to consider? (optional)",
                     key="ai_portfolio_q",
@@ -4565,10 +4575,12 @@ if nav == "Research":
                         {"Price": snap["chart"]["price"], "VWAP": snap["chart"]["VWAP"]},
                         key_prefix=f"research_intraday_{ticker}", height=220, intraday=True,
                         colors={"Price": "#87d1ff", "VWAP": "#c792ea"})
-                    st.caption("VWAP = today's volume-weighted avg price. **Above VWAP** = buyers in control "
-                               "intraday; **below** = sellers. Range position: 0% = at the day's low, 100% = at "
-                               "the high. **Descriptive only — this does NOT predict the next few hours.** For "
-                               "same-day / 0–2 DTE options, theta + gamma are brutal; use this to time *your* exit.")
+                    _info_header("ℹ️ How to read this", (
+                        "VWAP = today's volume-weighted avg price. Above VWAP = buyers in "
+                        "control intraday; below = sellers. Range position: 0% = at the day's "
+                        "low, 100% = at the high. Descriptive only — this does NOT predict the "
+                        "next few hours. For same-day / 0–2 DTE options, theta + gamma are "
+                        "brutal; use this to time your exit."), size="0.85rem")
                 else:
                     st.caption("Click **Load intraday** for today's VWAP, range, and move (market-hours only).")
 
@@ -4599,16 +4611,16 @@ if nav == "Research":
                                            f"Δ {g.get('delta')} · θ/day {g.get('theta_per_day')} · vega {g.get('vega')}")
 
             with st.container(border=True):
-                st.subheader("🤖 AI interpretation (optional, real spend)")
+                _info_header("🤖 AI interpretation (optional, real spend)", (
+                    "Runs 4 short Claude Haiku calls (technical / options / skeptic / "
+                    "executive) that interpret the deterministic numbers above — they never "
+                    "invent their own. Real spend, ~$0.02–0.03/run, governed by the same "
+                    "$3/day · $0.15/run cap as the CLI. Every result is logged to the 🎯 "
+                    "Scorecard and graded against the deterministic baseline above — the AI "
+                    "is on trial, not trusted by default."), size="1.3rem")
                 if not os.getenv("ANTHROPIC_API_KEY"):
                     _ai_key_missing_notice()
                 else:
-                    st.caption("Runs 4 short Claude Haiku calls (technical / options / skeptic / "
-                              "executive) that **interpret** the deterministic numbers above — they "
-                              "never invent their own. Real spend, ~$0.02–0.03/run, governed by the "
-                              "same $3/day · $0.15/run cap as the CLI. Every result is logged to the "
-                              "🎯 Scorecard and graded against the deterministic baseline above — the "
-                              "AI is on trial, not trusted by default.")
                     ai_key = f"ai_interp_{ticker}"
                     ai_question = st.text_input(
                         "Anything specific you want the agents to consider? (optional)",
@@ -4848,15 +4860,15 @@ if nav == "Deep Research":
             render_dossier(D, use_expanders=True)
 
             with st.container(border=True):
-                st.subheader("🤖 AI interpretation (optional, real spend)")
+                _info_header("🤖 AI interpretation (optional, real spend)", (
+                    "One Claude Haiku call that interprets the dossier above — bull case, "
+                    "bear case, and the biggest open uncertainty. Never invents numbers; "
+                    "reasons only from the fields already shown, each with its own confidence/"
+                    "source. Real spend, ~$0.01/run, same cost caps as the Research page's AI "
+                    "section."), size="1.3rem")
                 if not os.getenv("ANTHROPIC_API_KEY"):
                     _ai_key_missing_notice()
                 else:
-                    st.caption("One Claude Haiku call that interprets the dossier above — bull "
-                              "case, bear case, and the biggest open uncertainty. Never invents "
-                              "numbers; reasons only from the fields already shown, each with its "
-                              "own confidence/source. Real spend, ~$0.01/run, same cost caps as "
-                              "the Research page's AI section.")
                     dr_ai_key = f"ai_dossier_{tk_show}"
                     dr_question = st.text_input(
                         "Anything specific you want the agent to consider? (optional)",
@@ -4945,10 +4957,12 @@ if nav == "Ticker Page":
 
 # ─────────────────────────── Catalyst Radar ───────────────────────────
 if nav == "Catalysts":
-    st.caption("**Public but low-visibility catalysts** — earnings dates, SEC 8-K filings, insider Form 4 "
-               "trades, and (for biotech) clinical trial readouts. All technically disclosed, none of it "
-               "requires a paid feed — the point is most of it doesn't get headline coverage before the "
-               "market reacts. NOT insider information: everything here is public SEC/ClinicalTrials.gov data.")
+    _info_header("📡 Catalyst Radar", (
+        "Public but low-visibility catalysts — earnings dates, SEC 8-K filings, insider Form "
+        "4 trades, and (for biotech) clinical trial readouts. All technically disclosed, none "
+        "of it requires a paid feed — the point is most of it doesn't get headline coverage "
+        "before the market reacts. NOT insider information: everything here is public SEC/"
+        "ClinicalTrials.gov data."), size="1.3rem")
     default_watch = sorted({e["ticker"] for e in journal.all_entries(DB)})
     cat_extra = st.text_input("Add tickers (comma-separated)", "", key="cat_extra")
     cat_universe = st.checkbox("Also include the full scan universe (~90 names, slower)",
