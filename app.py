@@ -11,7 +11,7 @@ import math
 import os
 import struct
 import wave
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
@@ -35,6 +35,7 @@ from iip import journal
 from iip import macro
 from iip import market_dna as mdna
 from iip import portfolio
+from iip import premarket_thesis as pt
 from iip import reddit_momentum as rm
 from iip import scanner
 from iip import screener
@@ -99,8 +100,13 @@ def _info_header(label: str, tooltip: str, size: str = "0.95rem",
                  color: str = "#87d1ff") -> None:
     """Section header with a bright, noticeable hover-info icon (per user request, app-wide
     cohesiveness pass 2026-08) -- replaces long always-visible caption paragraphs that used to sit
-    permanently under a header, eating vertical space, with a single-line header plus an ⓘ icon
+    permanently under a header, eating vertical space, with a single-line header plus an info icon
     that reveals the same text on hover.
+
+    Renders a plain "i" glyph, NOT the pre-circled Unicode "ⓘ" -- confirmed live that stacking the
+    already-circled glyph inside this function's OWN circular badge produced a lumpy double-circle
+    blob (reported by the user as looking like "a butt"), not a clean icon. A plain letter inside
+    one single badge shape avoids that entirely.
 
     Deliberately custom HTML (colored circular badge + native `title` attribute) instead of
     Streamlit's own `st.caption(..., help=...)` icon -- confirmed live the native one renders as a
@@ -116,8 +122,9 @@ def _info_header(label: str, tooltip: str, size: str = "0.95rem",
         f'<span style="font-weight:700;font-size:{size}">{safe_label}</span>'
         f'<span title="{safe_tooltip}" style="display:inline-flex;align-items:center;'
         f'justify-content:center;width:1.15rem;height:1.15rem;border-radius:50%;flex-shrink:0;'
-        f'background:{color};color:#0a0f10;font-size:0.72rem;font-weight:900;cursor:help;'
-        f'line-height:1">ⓘ</span></div>', unsafe_allow_html=True)
+        f'background:{color};color:#0a0f10;font-family:Georgia,\'Times New Roman\',serif;'
+        f'font-size:0.8rem;font-weight:800;font-style:italic;cursor:help;'
+        f'line-height:1">i</span></div>', unsafe_allow_html=True)
 
 
 def _render_kpi_tiles(s: dict, dpnl: dict | None):
@@ -745,6 +752,14 @@ def zd_fetch_historical_5m(ticker):
     return zd.fetch_historical_5m(ticker)
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def pt_fetch_futures():
+    # Same 30s-ish cadence as the rest of the live 0DTE fetches (zd_fetch_intraday is 25s) --
+    # futures are the freshest-moving input to the Premarket Thesis, so this shouldn't lag behind
+    # the other quotes on the page.
+    return pt.fetch_futures_batch()
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def zd_regime_stats(ticker):
     # 5-min TTL (per user request, promoted from a manual on-demand button to an always-visible
@@ -1149,7 +1164,7 @@ def _render_decision_form(heading: str, default_ticker: str | None = None, key_s
                 else:
                     try:
                         info = get_company_info(jtk)
-                        spot0 = float(load_prices(jtk)["Close"].iloc[-1])
+                        spot0 = data.last_valid_close(load_prices(jtk))
                     except Exception:
                         info, spot0 = {}, None
                     journal.add(DB, {
@@ -1496,7 +1511,9 @@ def render_trade_drawer():
                         st.session_state["drawer_ticker"] = dtk
                         try:
                             with st.spinner(f"Loading {dtk}…"):
-                                dspot = float(load_prices(dtk)["Close"].iloc[-1])
+                                dspot = data.last_valid_close(load_prices(dtk))
+                            if dspot is None:
+                                raise ValueError("no valid close price available")
                         except Exception as e:
                             st.error(f"Couldn't load {dtk}: {e}")
                         else:
@@ -1915,11 +1932,11 @@ def _render_watchlist_table(watched: list[dict]):
         tk = w["ticker"]
         try:
             info = get_company_info(tk)
-            prices = load_prices(tk)
-            spot = float(prices["Close"].iloc[-1])
-            day_chg = ((spot / float(prices["Close"].iloc[-2]) - 1) * 100
-                      if len(prices) >= 2 else None)
-            spark = [float(v) for v in prices["Close"].tail(20).tolist()]
+            valid_close = load_prices(tk)["Close"].dropna()
+            spot = float(valid_close.iloc[-1])
+            day_chg = ((spot / float(valid_close.iloc[-2]) - 1) * 100
+                      if len(valid_close) >= 2 else None)
+            spark = [float(v) for v in valid_close.tail(20).tolist()]
         except Exception:
             info, spot, day_chg, spark = {}, None, None, []
         cat = get_rm_catalyst(tk)
@@ -2038,6 +2055,8 @@ def _render_candlestick(ticker: str, key_prefix: str):
     n = RANGES[rng]
     cdf = (df.tail(n) if n else df).reset_index()
     cdf.columns = ["Date"] + list(cdf.columns[1:])   # normalize whatever yfinance named the index
+    cdf = cdf[cdf["Close"].notna()]   # drop any trailing all-NaN session row (yfinance sometimes
+    # appends one for the most recent day before that session's data is fully available upstream)
 
     last_close = float(cdf["Close"].iloc[-1])
     day_chg = ((last_close / float(cdf["Close"].iloc[-2]) - 1) * 100) if len(cdf) >= 2 else 0.0
@@ -3077,6 +3096,148 @@ def _render_regime_outcome_table(stats: dict):
               "Hover the header above for methodology.")
 
 
+def _render_premarket_thesis(index_snaps: dict, vix_snap: dict | None, participation: dict,
+                             intraday: dict, daily: dict, alignment: dict, now_et: datetime):
+    """SPY Premarket Thesis (deterministic phase only) -- per the user-approved, ChatGPT-refined
+    spec, see iip/premarket_thesis.py's module docstring for the full hierarchy/handoff/signal-
+    family design. Always about SPY specifically, regardless of which ticker is selected elsewhere
+    on this page (index_snaps already has SPY/QQQ/IWM/DIA fetched from the same batch either way).
+
+    PRIMARY only before the intraday alignment engine has real data (or past the 10:00 ET
+    backstop) -- see pt.is_primary(). Past that point this collapses to a small reference
+    expander instead of competing with Day Regime for the top of the page, per the explicit
+    'no indicator soup' hierarchy requirement."""
+    spy_snap = index_snaps.get("SPY")
+    if not spy_snap:
+        return
+    qqq_snap, iwm_snap, dia_snap = index_snaps.get("QQQ"), index_snaps.get("IWM"), index_snaps.get("DIA")
+
+    futures = pt_fetch_futures()
+    mb = get_macro_batch()
+    y10_df = mb.get(macro.YIELD_TICKERS["10Y"])
+    y10_close = y10_df["Close"].dropna() if y10_df is not None else None
+    y10_chg = (float(y10_close.iloc[-1] - y10_close.iloc[-2])
+              if y10_close is not None and len(y10_close) >= 2 else None)
+    wti_df = mb.get(macro.OIL_TICKERS["WTI"])
+    wti_close = wti_df["Close"].dropna() if wti_df is not None else None
+    wti_chg = (round((float(wti_close.iloc[-1]) / float(wti_close.iloc[-2]) - 1) * 100, 3)
+              if wti_close is not None and len(wti_close) >= 2 else None)
+    or15 = zd.opening_range(intraday.get("SPY"), minutes=15)
+    prev_day = zd.previous_day_levels(daily.get("SPY"))
+    qqq_rel = (round(qqq_snap["day_change_pct"] - spy_snap["day_change_pct"], 3)
+              if qqq_snap and spy_snap else None)
+
+    thesis = pt.build_thesis(spy_snap, qqq_snap, iwm_snap, dia_snap, vix_snap, futures, y10_chg,
+                             wti_chg, participation, or15, prev_day, qqq_rel)
+    direction = thesis["market_state"]["direction"]
+
+    # Persistence -- idempotent (DB-enforced uniqueness), safe to call every 30s refresh.
+    try:
+        pt.log_thesis_once("SPY", thesis)
+        if thesis["confirmation"]["status"] == "CONFIRMED":
+            pt.log_confirmation_event_once("SPY", direction)
+    except Exception:
+        pass  # best-effort, same discipline as every other calibration log on this page
+
+    original = None
+    try:
+        original = pt.get_todays_thesis("SPY")
+    except Exception:
+        pass
+
+    # 10:00 AM checkpoint -- idempotent past the cutoff, only the first attempt after 10:00 ET
+    # actually persists (schema-enforced), so calling this every refresh past that time is safe.
+    if original and now_et.time() >= dtime(10, 0):
+        try:
+            confirmation_event = pt.get_confirmation_event("SPY")
+            market_open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+            checkpoint = pt.compute_checkpoint(original, spy_snap["last"], direction,
+                                               confirmation_event, "10:00 AM", market_open_et)
+            pt.log_checkpoint("SPY", "10:00 AM", checkpoint)
+        except Exception:
+            pass
+
+    primary = pt.is_primary(now_et, alignment["total"])
+    dir_color = {"Bullish": "#79ed8e", "Bearish": "#ff8080", "Neutral": "#87d1ff"}[direction]
+    dir_emoji = {"Bullish": "🟢", "Bearish": "🔴", "Neutral": "⚪"}[direction]
+
+    if not primary:
+        # Archived/reference form once Day Regime has taken over -- still visible (the 10am
+        # checkpoint needs somewhere to show up), just not competing for top-of-page attention.
+        ref = original or thesis
+        ref_dir = ref["market_state"]["direction"]
+        with st.expander(f"📋 This morning's SPY Premarket Thesis: {ref_dir} "
+                         f"{ref['market_state']['confidence']:.0f}/100"):
+            st.caption("Handed off to Day Regime above once real intraday data existed — this is "
+                      "a reference to the morning's original (immutable) read, not a live score.")
+            checkpoints = []
+            try:
+                checkpoints = pt.get_checkpoints("SPY")
+            except Exception:
+                pass
+            for cp in checkpoints:
+                st.write(f"**{cp['label']} checkpoint** — direction: {cp['directional_accuracy']} · "
+                        f"tradeability: {cp['tradeability']} ({cp['tradeability_reason']})")
+            if not checkpoints:
+                st.caption("No checkpoint graded yet (first one fires at 10:00 ET).")
+        return
+
+    with st.container(border=True):
+        _info_header("🧭 SPY Premarket Thesis", (
+            "Deterministic-only for now — direction/confidence/risk from 8 signal families "
+            "(equity/growth/small-cap/defensive/volatility/rates/oil/breadth), each family "
+            "bounded so correlated instruments (SPY+ES, QQQ+NQ, IWM+RTY) don't get counted "
+            "multiple times and inflate confidence artificially. Shown as PRIMARY only until "
+            "Day Regime has real intraday data (or 10:00 ET, whichever comes first) — then this "
+            "becomes a reference note, not the active read. Never a trade signal by itself; see "
+            "Trade Permission below for that distinction."), size="1.3rem")
+        c1, c2, c3 = st.columns(3)
+        c1.markdown(f'<div style="font-size:0.75rem;color:#8b9a9d">DIRECTION</div>'
+                   f'<div style="font-size:1.5rem;font-weight:800;color:{dir_color}">'
+                   f'{dir_emoji} {direction}</div>', unsafe_allow_html=True)
+        c2.markdown(f'<div style="font-size:0.75rem;color:#8b9a9d">CONFIDENCE</div>'
+                   f'<div style="font-size:1.5rem;font-weight:800;color:{_score_color(thesis["market_state"]["confidence"])}">'
+                   f'{thesis["market_state"]["confidence"]:.0f}/100</div>', unsafe_allow_html=True)
+        c3.markdown(f'<div style="font-size:0.75rem;color:#8b9a9d">RISK ENVIRONMENT</div>'
+                   f'<div style="font-size:1.5rem;font-weight:800;color:#e8ecec">'
+                   f'{thesis["risk_environment"]["level"]}</div>', unsafe_allow_html=True)
+
+        perm = thesis["trade_permission"]
+        perm_color = {"WAIT": "#fabf6b", "CALLS_FAVORED": "#79ed8e", "PUTS_FAVORED": "#ff8080",
+                     "NO_TRADE": "#8b9a9d"}.get(perm["status"], "#8b9a9d")
+        st.markdown(f'<div style="padding:0.5rem 0.8rem;background:{perm_color}1a;border:1.5px '
+                   f'solid {perm_color};border-radius:8px;margin:0.6rem 0 0.4rem 0">'
+                   f'<b style="color:{perm_color}">Trade Permission: '
+                   f'{perm["status"].replace("_", " ")}</b><br>'
+                   f'<span style="font-size:0.82rem;color:#8b9a9d">{_esc(perm["reason"])}</span>'
+                   f'</div>', unsafe_allow_html=True)
+
+        with st.expander("Why?  ·  Confirmation  ·  Invalidation", expanded=False):
+            st.markdown("**Why?** (each row is one bounded signal family, not one ticker)")
+            for name, f in thesis["families"].items():
+                unit = "pts" if "Rates" in name else "%"
+                raw_str = f"{f['raw_pct']:+.2f}{unit}" if f["raw_pct"] is not None else "no data"
+                st.write(f"{f['points']:+.1f}  {name}  ({raw_str})")
+
+            conf = thesis["confirmation"]
+            st.markdown(f"**Confirmation — {conf['status']}**")
+            if conf["checks"]:
+                for label, ok in conf["checks"]:
+                    st.write(f"{'✓' if ok else '✗'} {label}")
+            else:
+                st.caption(conf.get("note", "No directional thesis to confirm."))
+
+            inval = thesis["invalidation"]
+            st.markdown(f"**Invalidation — {inval['status']}**")
+            if inval["checks"]:
+                for label, ok in inval["checks"]:
+                    st.write(f"{'✓' if ok else '✗'} {label}")
+
+        st.caption("The machine calculates, the AI explains — no LLM narrative in this phase; "
+                  "every number above is code-computed. Immutable once logged each morning — "
+                  "today's original read never gets silently rewritten, even by later refreshes.")
+
+
 @st.fragment(run_every=30)
 def _render_zero_dte(ticker: str):
     intraday = zd_fetch_intraday()
@@ -3551,12 +3712,15 @@ def _render_zero_dte(ticker: str):
     rsp_spy = get_rsp_vs_spy()
 
     def _last_close(df):
-        return float(df["Close"].iloc[-1]) if df is not None and not df.empty else None
+        return data.last_valid_close(df)
 
     def _day_chg(df):
-        if df is None or len(df) < 2:
+        if df is None:
             return None
-        return (float(df["Close"].iloc[-1]) / float(df["Close"].iloc[-2]) - 1) * 100
+        c = df["Close"].dropna()
+        if len(c) < 2:
+            return None
+        return (float(c.iloc[-1]) / float(c.iloc[-2]) - 1) * 100
 
     yield_10y = _last_close(mb.get(macro.YIELD_TICKERS["10Y"]))
     dxy = _last_close(mb.get(macro.DXY_TICKER))
@@ -3573,6 +3737,13 @@ def _render_zero_dte(ticker: str):
          "Macro & Diagnostics"])
 
     with tab_overview:
+        # SPY Premarket Thesis (PIIP audit 2026-08, deterministic phase, per user-approved spec):
+        # rendered FIRST, above Day Regime -- it's specifically the read for BEFORE Day Regime can
+        # say anything, so it has to sit above it, not below. Hands itself off (collapses to a
+        # small reference expander) once real intraday data exists -- see pt.is_primary().
+        _render_premarket_thesis(index_snaps, vix_snap, participation, intraday, daily, alignment,
+                                 datetime.now(ZoneInfo("America/New_York")))
+
         # Day Regime (PIIP audit 2026-08, Batch 2 / Phase 1 + Phase 27): "what kind of day is this"
         # answered FIRST, above Trade Confidence -- your own spec's own UI-priority mockup put this at
         # the very top of the page, before any single-number score.
@@ -4541,7 +4712,9 @@ if nav == "Research":
     if ticker:
         try:
             prices = load_prices(ticker)
-            spot = float(prices["Close"].iloc[-1])
+            spot = data.last_valid_close(prices)
+            if spot is None:
+                raise ValueError(f"No valid close price for {ticker!r}")
             st.metric(f"{ticker} — {get_company_info(ticker).get('name') or ticker}", f"${spot:,.2f}")
 
             # PIIP audit 2026-08: rolling SMAs computed on the FULL price history first, THEN
