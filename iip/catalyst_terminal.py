@@ -129,6 +129,14 @@ def _importance_score(headline: str, summary: str) -> tuple[float, list[str]]:
     return score, hits
 
 
+def matched_keywords(text: str) -> list[str]:
+    """Public wrapper around _importance_score()'s keyword matching, for callers that just want
+    the matched IMPORTANCE_KEYWORDS hits (e.g. catalyst_ai.py running the SAME deterministic
+    matching against an 8-K's own document text, not just live headlines) without needing the
+    importance score itself."""
+    return _importance_score("", text)[1]
+
+
 # Simple keyword-valence lean -- same mechanism and honesty level as IMPORTANCE_KEYWORDS above
 # (deterministic word matching, no LLM), NOT a backtested directional signal. This session's own
 # research found that even real historical calibration (oil spikes, generic "war" headlines)

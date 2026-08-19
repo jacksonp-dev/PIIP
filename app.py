@@ -23,8 +23,10 @@ import streamlit as st
 from iip import agents
 from iip import appstate
 from iip import baseline, backtest as bt, data
+from iip import catalyst_ai as cai
 from iip import catalyst_calibration as catcal
 from iip import catalyst_terminal as ct
+from iip import cost as costmod
 from iip import deterministic as det
 from iip import deep_research as dr
 from iip import predictions as pred
@@ -5376,6 +5378,76 @@ if nav == "Catalysts":
                 '</div>', unsafe_allow_html=True)
         st.caption("**FDA PDUFA / decision dates have no free calendar** and are NOT included — that gap "
                    "is real; those still have to be found manually in filings/press releases.")
+
+        # AI document read for 8-Ks (per direct user request): key dates + a qualitative trend
+        # read from the ACTUAL filing text -- Form 4/Earnings/Trial rows are already fully
+        # informative as structured data (no document to read), so only 8-Ks get this treatment.
+        # Historical "confidence" is NEVER AI-invented -- iip/catalyst_ai.py hard-validates the
+        # response and rejects any confidence/probability/reliability field the model tries to
+        # add; the only real historical grounding shown comes from catalyst_calibration.py's
+        # actual researched data, surfaced separately.
+        eight_ks = [r for r in rows if r["kind"] == "8-K filing"]
+        if eight_ks:
+            st.markdown("---")
+            _info_header("🧠 AI document read (optional, real spend)", (
+                "Fetches each 8-K's real text and extracts specific key dates plus a qualitative "
+                "trend read (Bullish/Bearish/Neutral/Mixed), grounded in that document's own "
+                "content. The AI never invents a confidence number -- historical grounding comes "
+                "ENTIRELY from catalyst_calibration.py's real researched reliability data (the "
+                "same tiers used elsewhere in this app), shown separately below the AI's read. If "
+                "no researched category matches a filing's event type, that's shown explicitly "
+                "as 'no historical calibration,' never filled in with a guess."), size="0.95rem")
+            if not os.getenv("ANTHROPIC_API_KEY"):
+                _ai_key_missing_notice()
+            else:
+                cat_ai_results = st.session_state.setdefault("cat_ai_results", {})
+                to_analyze = [r for r in eight_ks if r["url"] not in cat_ai_results]
+                est_per_doc = costmod.est_call_cost(agents.DEFAULT_MODEL, in_tok=4000, out_tok=500)
+                if to_analyze:
+                    label = (f"🧠 Analyze all {len(to_analyze)} new 8-K filing(s) "
+                            f"(~${est_per_doc * len(to_analyze):.3f} est.)")
+                else:
+                    label = f"🧠 All {len(eight_ks)} 8-K(s) already analyzed"
+                if st.button(label, key="cat_ai_bulk_btn", disabled=not to_analyze) and to_analyze:
+                    client = agents.LLMClient(
+                        budget=agents.Budget(max_calls_per_run=max(len(to_analyze), 4)), dry_run=False)
+                    progress = st.progress(0.0, text=f"Analyzing 0/{len(to_analyze)}…")
+                    for i, r in enumerate(to_analyze):
+                        cat_ai_results[r["url"]] = cai.analyze_filing(r["ticker"], r["url"], client)
+                        progress.progress((i + 1) / len(to_analyze),
+                                         text=f"Analyzing {i + 1}/{len(to_analyze)}…")
+                    spent = sum(cat_ai_results[r["url"]].get("_cost", 0) or 0 for r in to_analyze)
+                    st.toast(f"Analyzed {len(to_analyze)} filing(s) — ${spent:.4f} spent.")
+                    st.rerun()
+
+                for r in eight_ks:
+                    result = cat_ai_results.get(r["url"])
+                    if not result:
+                        continue
+                    with st.expander(f"{r['ticker']} — {r['date']} 8-K analysis"):
+                        if not result.get("_valid"):
+                            st.error(f"INVALID / unavailable — {result.get('_reason', 'unknown')}")
+                            if result.get("_dry_run"):
+                                st.caption("(Dry-run mode — PIIP_LIVE_LLM isn't set to 1, so no "
+                                          "real call was made.)")
+                            continue
+                        trend_color = {"Bullish": "#79ed8e", "Bearish": "#ff8080",
+                                      "Neutral": "#87d1ff", "Mixed": "#fabf6b"}.get(
+                                          result["trend"], "#8b9a9d")
+                        st.markdown(f'<b style="color:{trend_color}">{result["trend"]}</b>',
+                                   unsafe_allow_html=True)
+                        st.write(result["summary"])
+                        if result["key_dates"]:
+                            st.markdown("**Key dates**")
+                            for kd in result["key_dates"]:
+                                st.write(f"· {_esc(kd['date'])} — {_esc(kd['description'])}")
+                        st.markdown("**Historical calibration**")
+                        calib = result.get("_calibration") or {}
+                        if not calib:
+                            st.caption("No researched historical calibration matches this event "
+                                      "type — not the same as 'no effect,' just not researched yet.")
+                        else:
+                            st.caption(catcal.summarize(calib))
 
 # ─────────────────────────── Glossary ───────────────────────────
 if nav == "Glossary":
