@@ -56,6 +56,20 @@ def get_spot(ticker: str) -> float:
     return spot
 
 
+def get_etf_top_holdings(ticker: str, n: int = 10) -> list[str]:
+    """Real, live top-N constituent tickers for an ETF (yfinance's funds_data.top_holdings,
+    confirmed live to work for SPY/QQQ/DIA/IWM) -- not a hardcoded list, so it never silently
+    goes stale as holdings drift. [] if the ticker isn't a fund, or the request fails -- never
+    raises (same degrade-gracefully convention as list_expiries())."""
+    try:
+        holdings = yf.Ticker(ticker).funds_data.top_holdings
+    except Exception:
+        return []
+    if holdings is None or holdings.empty:
+        return []
+    return [str(sym).upper() for sym in holdings.index[:n]]
+
+
 def get_intraday(ticker: str, interval: str = "5m", period: str = "1d") -> pd.DataFrame | None:
     """Intraday bars for active watching (VWAP, today's move). Small lookback per yfinance limits.
     Returns None if empty (e.g. market closed and no session data)."""

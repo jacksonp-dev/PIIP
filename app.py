@@ -850,6 +850,13 @@ def _parse_date(s):
     return None
 
 
+@st.cache_data(ttl=3600 * 4, show_spinner=False)
+def get_etf_holdings(ticker: str, n: int = 10) -> list[str]:
+    # 4h TTL -- fund holdings drift slowly (daily rebalancing at most), no need to re-fetch
+    # every page load the way live quotes do.
+    return data.get_etf_top_holdings(ticker, n)
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_catalyst_rows(tickers: tuple) -> list:
     """One row per dated event (earnings, 8-K, Form 4, trial completion) across `tickers`, for the
@@ -5280,12 +5287,26 @@ if nav == "Catalysts":
     cat_extra = st.text_input("Add tickers (comma-separated)", "", key="cat_extra")
     cat_universe = st.checkbox("Also include the full scan universe (~90 names, slower)",
                                value=False, key="cat_universe")
+
+    # ETFs (SPY/QQQ/IWM/DIA) don't themselves file 8-Ks or report earnings -- confirmed live via
+    # SEC EDGAR (SPY/QQQ/DIA only file fund-administrative paperwork: NPORT-P, 497, N-30D, etc.;
+    # IWM doesn't even resolve to a ticker->CIK match). Per explicit user decision: scan each
+    # ETF's real, LIVE top-10 holdings (yfinance funds_data, never a hardcoded list that could
+    # drift stale) instead -- an ETF's actual catalysts are really its constituents' catalysts.
+    # Kept in its OWN session_state key (not folded straight into cat_picks) so it stays part of
+    # `candidates` across reruns -- otherwise a previously-added ETF holding would vanish from the
+    # multiselect's own options list (Streamlit requires every selected value to also be a valid
+    # option) as soon as this button isn't the thing that just ran.
+    if "cat_etf_universe" not in st.session_state:
+        st.session_state["cat_etf_universe"] = set()
+
     candidates = list(default_watch)
     extra_tickers = [t.strip().upper() for t in cat_extra.split(",") if t.strip()]
     if extra_tickers:
         candidates += extra_tickers
     if cat_universe:
         candidates += list(scanner.NAMES.keys())
+    candidates += list(st.session_state["cat_etf_universe"])
     candidates = sorted(set(candidates))
 
     # Streamlit forbids passing both `default=` and writing to st.session_state[key] for the same
@@ -5301,6 +5322,25 @@ if nav == "Catalysts":
     if extra_tickers:
         already_picked = set(st.session_state.get("cat_picks", default_watch[:15]))
         st.session_state["cat_picks"] = sorted(already_picked | set(extra_tickers))
+
+    if st.button(f"🔄 Scan {'/'.join(zd.INDEX_TICKERS)} top holdings", key="cat_etf_scan_btn"):
+        with st.spinner(f"Fetching top holdings for {', '.join(zd.INDEX_TICKERS)}…"):
+            etf_universe: set[str] = set()
+            for etf in zd.INDEX_TICKERS:
+                etf_universe.update(get_etf_holdings(etf))
+        if not etf_universe:
+            st.warning("Couldn't fetch ETF holdings right now — try again in a moment.")
+        else:
+            st.session_state["cat_etf_universe"] |= etf_universe
+            already_picked = set(st.session_state.get("cat_picks", default_watch[:15]))
+            new_picks = sorted(already_picked | etf_universe)
+            st.session_state["cat_picks"] = new_picks
+            candidates = sorted(set(candidates) | etf_universe)   # keep this run's options in sync too
+            with st.spinner(f"Checking earnings, SEC filings, and trial dates for "
+                            f"{len(new_picks)} ticker(s)…"):
+                st.session_state["cat_rows"] = get_catalyst_rows(tuple(new_picks))
+            st.toast(f"Added {len(etf_universe)} tickers from {', '.join(zd.INDEX_TICKERS)}'s "
+                    f"top holdings and scanned.")
 
     cat_picks = st.multiselect("Scan these tickers", candidates, key="cat_picks")
 
