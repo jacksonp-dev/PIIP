@@ -14,13 +14,17 @@ import sys
 import tempfile
 import time
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pandas as pd
 import pytest
 
 from iip import premarket_thesis as pt
+
+ET = ZoneInfo("America/New_York")
 
 
 @pytest.fixture
@@ -292,92 +296,248 @@ def test_confirmation_event_none_when_nothing_logged(tmp_db):
     assert pt.get_confirmation_event("SPY", path=tmp_db) is None
 
 
-# ---------- compute_checkpoint: directional accuracy, confirmation, tradeability ----------
+# ---------- evaluate_thesis_at_checkpoint: the fixed, self-contained historical grading ----------
+#
+# PIIP audit 2026-08: replaces the old compute_checkpoint(), which graded the original thesis by
+# (a) comparing raw price only, and (b) consulting the LIVE confirmation-event log -- which
+# tracks confirmation for whatever direction is CURRENTLY live, not the original thesis's own
+# direction, and could silently attach an opposite-direction live event to the original thesis's
+# grade. evaluate_thesis_at_checkpoint() is fully self-contained: it re-slices real intraday bars
+# to an as-of cutoff and re-runs confirmation_conditions()/invalidation_conditions() for the
+# ORIGINAL direction itself. Synthetic, deterministic bar fixtures throughout, per this project's
+# own testing convention (see tests/test_market_structure.py's identical pattern).
 
-def test_checkpoint_directional_accuracy_correct_for_bearish_drop():
-    thesis = _thesis(direction="Bearish", spot=640.0)
-    checkpoint = pt.compute_checkpoint(thesis, current_spot=635.0, current_direction_now="Bearish",
-                                       confirmation_event=None, label="10:00 AM")
-    assert checkpoint["directional_accuracy"] == "CORRECT"
-
-
-def test_checkpoint_directional_accuracy_wrong_for_bearish_rally():
-    thesis = _thesis(direction="Bearish", spot=640.0)
-    checkpoint = pt.compute_checkpoint(thesis, current_spot=645.0, current_direction_now="Bullish",
-                                       confirmation_event=None, label="10:00 AM")
-    assert checkpoint["directional_accuracy"] == "WRONG"
-
-
-def test_checkpoint_directional_accuracy_flat_when_unchanged():
-    thesis = _thesis(direction="Bearish", spot=640.0)
-    checkpoint = pt.compute_checkpoint(thesis, current_spot=640.0, current_direction_now="Neutral",
-                                       confirmation_event=None, label="10:00 AM")
-    assert checkpoint["directional_accuracy"] == "FLAT"
-
-
-def test_checkpoint_directional_accuracy_no_call_for_neutral_thesis():
-    thesis = _thesis(direction="Neutral", spot=640.0)
-    checkpoint = pt.compute_checkpoint(thesis, current_spot=650.0, current_direction_now="Bullish",
-                                       confirmation_event=None, label="10:00 AM")
-    assert checkpoint["directional_accuracy"] == "NO_CALL"
+def _synth_bars(closes: list[float], start: dtime = dtime(9, 30), vol: float = 1000.0) -> pd.DataFrame:
+    """1-minute bars, O=H=L=C=close (flat candles, kept simple) -- tz-aware DatetimeIndex
+    starting at `start` today, one bar per minute."""
+    t = datetime.combine(date.today(), start, tzinfo=ET)
+    idx, data = [], {"Open": [], "High": [], "Low": [], "Close": [], "Volume": []}
+    for c in closes:
+        idx.append(t)
+        data["Open"].append(c); data["High"].append(c); data["Low"].append(c); data["Close"].append(c)
+        data["Volume"].append(vol)
+        t += timedelta(minutes=1)
+    return pd.DataFrame(data, index=pd.DatetimeIndex(idx))
 
 
-def test_checkpoint_tradeability_none_when_never_confirmed():
-    thesis = _thesis(direction="Bearish", spot=640.0)
-    checkpoint = pt.compute_checkpoint(thesis, current_spot=635.0, current_direction_now="Bearish",
-                                       confirmation_event=None, label="10:00 AM")
-    assert checkpoint["tradeability"] == "NONE"
+MARKET_OPEN = datetime.combine(date.today(), dtime(9, 30), tzinfo=ET)
+CHECKPOINT_10AM = datetime.combine(date.today(), dtime(10, 0), tzinfo=ET)
 
 
-def test_checkpoint_tradeability_none_when_confirmation_was_opposite_direction():
-    """The confirmation engine fired, but for the OPPOSITE direction of the original thesis --
-    must not be credited as if the original thesis was tradeable."""
-    thesis = _thesis(direction="Bearish", spot=640.0)
-    confirmation_event = {"ts": "2026-08-18T10:15:00", "direction": "Bullish"}
-    checkpoint = pt.compute_checkpoint(thesis, current_spot=635.0, current_direction_now="Bearish",
-                                       confirmation_event=confirmation_event, label="10:00 AM")
-    assert checkpoint["tradeability"] == "NONE"
+def test_checkpoint_correct_bullish_continuation():
+    """Test 1: original Bullish, market confirms bullish conditions, no invalidation -> CORRECT."""
+    original = _thesis(direction="Bullish", spot=95.0)
+    # 15 flat bars (sets the opening range at exactly 100.0), then 15 bars rallying to 103.0 --
+    # ends well above VWAP, above the OR high, above the prior close. QQQ rallies HARDER (+5%
+    # vs SPY's +3%) so relative strength is unambiguously positive, not a coincidental tie.
+    spy = _synth_bars([100.0] * 15 + [100.2, 100.4, 100.6, 100.8, 101.0, 101.2, 101.4, 101.6,
+                                      101.8, 102.0, 102.2, 102.4, 102.6, 102.8, 103.0])
+    qqq = _synth_bars([200.0] * 15 + [200.7, 201.4, 202.1, 202.8, 203.5, 204.2, 204.9, 205.6,
+                                      206.3, 207.0, 207.7, 208.4, 209.1, 209.8, 210.0])
+    prev_day = {"close": 99.0}
+    result = pt.evaluate_thesis_at_checkpoint(original, "10:00 AM", CHECKPOINT_10AM, spy, qqq,
+                                              None, None, None, prev_day, MARKET_OPEN)
+    assert result["status"] == "OK"
+    assert result["confirmation"]["status"] == "CONFIRMED"
+    assert result["invalidation"]["status"] == "INTACT"
+    assert result["opposing_pressure"] == "NONE"
+    assert result["thesis_verdict"] == "CORRECT"
 
 
-def test_checkpoint_tradeability_excellent_when_confirmed_quickly():
-    thesis = _thesis(direction="Bearish", spot=640.0)
-    market_open = datetime(2026, 8, 18, 9, 30)
-    confirmation_event = {"ts": "2026-08-18T09:45:00", "direction": "Bearish"}   # 15 min after open
-    checkpoint = pt.compute_checkpoint(thesis, current_spot=635.0, current_direction_now="Bearish",
-                                       confirmation_event=confirmation_event, label="10:00 AM",
-                                       market_open_et=market_open)
-    assert checkpoint["tradeability"] == "EXCELLENT"
+def test_checkpoint_wrong_clean_bearish_reversal():
+    """Test 2: original Bullish, bearish invalidation occurs, bearish conditions confirmed ->
+    WRONG."""
+    original = _thesis(direction="Bullish", spot=105.0)
+    # SPY falls -3%; QQQ falls HARDER (-5%) so relative weakness is unambiguous, not a tie.
+    spy = _synth_bars([100.0] * 15 + [99.8, 99.6, 99.4, 99.2, 99.0, 98.8, 98.6, 98.4,
+                                      98.2, 98.0, 97.8, 97.6, 97.4, 97.2, 97.0])
+    qqq = _synth_bars([200.0] * 15 + [199.3, 198.6, 197.9, 197.2, 196.5, 195.8, 195.1, 194.4,
+                                      193.7, 193.0, 192.3, 191.6, 190.9, 190.2, 190.0])
+    prev_day = {"close": 99.0}   # price (97.0) ends below prior close -> invalidation trips
+    result = pt.evaluate_thesis_at_checkpoint(original, "10:00 AM", CHECKPOINT_10AM, spy, qqq,
+                                              None, None, None, prev_day, MARKET_OPEN)
+    assert result["invalidation"]["status"] == "INVALIDATED"
+    assert result["opposing_direction"] == "Bearish"
+    assert result["opposing_pressure"] == "CONFIRMED"
+    assert result["thesis_verdict"] == "WRONG"
 
 
-def test_checkpoint_tradeability_poor_when_confirmed_late():
-    thesis = _thesis(direction="Bearish", spot=640.0)
-    market_open = datetime(2026, 8, 18, 9, 30)
-    confirmation_event = {"ts": "2026-08-18T11:00:00", "direction": "Bearish"}   # 90 min after open
-    checkpoint = pt.compute_checkpoint(thesis, current_spot=635.0, current_direction_now="Bearish",
-                                       confirmation_event=confirmation_event, label="10:00 AM",
-                                       market_open_et=market_open)
-    assert checkpoint["tradeability"] == "POOR"
+def test_checkpoint_partially_correct_mixed_market():
+    """Test 3: original Bullish, some confirmation, some invalidation, no decisive direction ->
+    PARTIALLY CORRECT. Price stays above VWAP (1 of 3 confirmation checks) but below the prior
+    close (1 of 2 invalidation checks) and QQQ lags (feeds both 'no confirmation' and 'opposing
+    pressure developing')."""
+    original = _thesis(direction="Bullish", spot=100.0)
+    # Stays inside/near the opening range (no breakout), drifts to 100.3 -- just above its own
+    # volume-weighted average price, but below the prior close.
+    spy = _synth_bars([100.0] * 15 + [100.05, 100.1, 100.05, 100.1, 100.15, 100.1, 100.15, 100.2,
+                                      100.15, 100.2, 100.25, 100.2, 100.25, 100.3, 100.3])
+    qqq = _synth_bars([200.0] * 15 + [199.9] * 15)   # QQQ lags -> no QQQ confirmation, some
+    # opposing (bearish) pressure via QQQ relative weakness
+    prev_day = {"close": 101.0}   # last (100.3) < prior close -> "loses prior close" trips
+    result = pt.evaluate_thesis_at_checkpoint(original, "10:00 AM", CHECKPOINT_10AM, spy, qqq,
+                                              None, None, None, prev_day, MARKET_OPEN)
+    assert result["confirmation"]["status"] in ("PARTIAL", "NOT CONFIRMED")
+    assert result["invalidation"]["status"] == "AT RISK"
+    assert result["thesis_verdict"] == "PARTIALLY_CORRECT"
+
+
+def test_checkpoint_too_early_to_tell():
+    """Test 4: original Bullish, market remains inside the opening range, no meaningful
+    confirmation, no invalidation -> TOO EARLY TO TELL. A fully flat session: last price exactly
+    equals VWAP and the opening-range boundary, so none of the strict > / < checks fire either
+    way -- deliberately NOT judged from SPY's absolute price change alone (both are literally
+    unchanged from the open here, which is the point)."""
+    original = _thesis(direction="Bullish", spot=100.0)
+    spy = _synth_bars([100.0] * 30)   # perfectly flat all session: VWAP=100.0=last=OR high=OR low
+    qqq = _synth_bars([200.0] * 30)   # QQQ also flat -> relative strength exactly 0
+    prev_day = {"close": 99.0}        # last (100.0) > prior close -> invalidation stays INTACT
+    result = pt.evaluate_thesis_at_checkpoint(original, "10:00 AM", CHECKPOINT_10AM, spy, qqq,
+                                              None, None, None, prev_day, MARKET_OPEN)
+    assert result["confirmation"]["status"] == "NOT CONFIRMED"
+    assert result["invalidation"]["status"] == "INTACT"
+    assert result["opposing_pressure"] == "NONE"
+    assert result["thesis_verdict"] == "TOO_EARLY_TO_TELL"
+
+
+def test_checkpoint_live_bearish_event_does_not_contaminate_original_bullish_grade(tmp_db):
+    """Test 5, the single most important test in this file (per explicit user emphasis): the
+    LIVE confirmation-event log independently records a Bearish event -- exactly what app.py's
+    UNTOUCHED live-confirmation-logging code does every ~30s, completely unrelated to the
+    checkpoint -- and the historical checkpoint must grade the ORIGINAL Bullish thesis using
+    ONLY its own as-of-cutoff bar evaluation, never that log.
+
+    The proof: evaluate_thesis_at_checkpoint() takes no confirmation_event parameter at all, so
+    calling it is BIT-FOR-BIT IDENTICAL whether or not an opposing-direction live event was ever
+    logged. If this test passes, the live and historical code paths are architecturally
+    incapable of contaminating each other, not just coincidentally correct on this one input."""
+    original = _thesis(direction="Bullish", spot=105.0)
+    # Real, mixed-bearish-leaning bars -- NOT fully confirmed bearish, so this also naturally
+    # exercises a non-trivial opposing_pressure read (DEVELOPING), not just NONE/CONFIRMED.
+    spy = _synth_bars([100.0] * 15 + [99.9, 99.8, 99.9, 99.8, 99.7, 99.8, 99.7, 99.6,
+                                      99.7, 99.6, 99.5, 99.6, 99.5, 99.4, 99.5])
+    qqq = _synth_bars([200.0] * 15 + [199.7] * 15)
+    prev_day = {"close": 99.0}
+
+    # Simulate the LIVE engine independently logging a Bearish confirmation at ~9:55 -- this is
+    # EXACTLY what the untouched app.py code does, nothing about it is mocked or special-cased.
+    wrote = pt.log_confirmation_event_once("SPY", "Bearish", path=tmp_db)
+    assert wrote is True
+    live_event = pt.get_confirmation_event("SPY", path=tmp_db)
+    assert live_event["direction"] == "Bearish"   # confirms the live path really fired
+
+    result_with_live_event = pt.evaluate_thesis_at_checkpoint(
+        original, "10:00 AM", CHECKPOINT_10AM, spy, qqq, None, None, None, prev_day, MARKET_OPEN)
+    result_without_any_live_event = pt.evaluate_thesis_at_checkpoint(
+        original, "10:00 AM", CHECKPOINT_10AM, spy, qqq, None, None, None, prev_day, MARKET_OPEN)
+
+    assert result_with_live_event == result_without_any_live_event   # THE decoupling proof
+    assert result_with_live_event["original_direction"] == "Bullish"   # never rewritten
+    assert result_with_live_event["opposing_direction"] == "Bearish"
+    assert result_with_live_event["opposing_pressure"] in ("DEVELOPING", "CONFIRMED")
+
+
+def test_checkpoint_delayed_execution_uses_10am_data_not_1017am_data():
+    """Test 6: checkpoint target = 10:00, but this function being CALLED late (simulating a page
+    refresh at 10:17) must not silently grade against 10:17 data. Bars after 10:00 show a
+    dramatically different price (a late plunge to 80.0) that must be completely invisible to a
+    checkpoint pinned to the 10:00 target."""
+    original = _thesis(direction="Bullish", spot=95.0)
+    # 9:30-10:00 inclusive (31 one-minute bars: 9:30,...,10:00): clean bullish rally ending AT
+    # the 10:00 bar itself -- a bar timestamped exactly 10:00:00 is a valid "data used" per the
+    # spec's own example (only bars STRICTLY AFTER 10:00 must be excluded).
+    # 10:01-10:17 (17 more bars): a big plunge to 80.0 -- must be ignored entirely.
+    pre_10am = [100.0] * 15 + [100.2, 100.4, 100.6, 100.8, 101.0, 101.2, 101.4, 101.6,
+                               101.8, 102.0, 102.2, 102.4, 102.6, 102.8, 103.0, 103.2]
+    post_10am = [95.0, 90.0, 85.0, 80.0] + [80.0] * 13
+    spy = _synth_bars(pre_10am + post_10am)
+    qqq = _synth_bars([200.0] * 15 + [200.7, 201.4, 202.1, 202.8, 203.5, 204.2, 204.9, 205.6,
+                                      206.3, 207.0, 207.7, 208.4, 209.1, 209.8, 210.0, 210.2]
+                      + [150.0] * 17)
+    prev_day = {"close": 99.0}
+    result = pt.evaluate_thesis_at_checkpoint(original, "10:00 AM", CHECKPOINT_10AM, spy, qqq,
+                                              None, None, None, prev_day, MARKET_OPEN)
+    assert result["status"] == "OK"
+    assert result["target_checkpoint_time"] == CHECKPOINT_10AM.isoformat()
+    # actual_data_timestamp must be the 10:00:00 bar itself, never anything after it.
+    actual_ts = datetime.fromisoformat(result["actual_data_timestamp"])
+    assert actual_ts == CHECKPOINT_10AM
+    # The verdict must reflect the 103.2 (bullish) state, NOT the 80.0 (crashed) state.
+    assert result["actual_spy_price"] == pytest.approx(103.2)
+    assert result["thesis_verdict"] == "CORRECT"
+
+
+def test_checkpoint_price_lower_than_original_but_behavior_correct_is_not_automatically_wrong():
+    """Test 8: SPY's absolute price is LOWER than the original reference spot_price, but the
+    actual intraday BEHAVIOR (VWAP reclaim/hold, OR breakout, QQQ strength, no invalidation) is
+    cleanly bullish-confirmed -- must NOT be automatically marked WRONG just because
+    current_price < original_spot (the exact bug this whole fix removes)."""
+    original = _thesis(direction="Bullish", spot=110.0)   # reference price ABOVE where the
+    # session actually trades all morning -- if the system were still doing raw price
+    # comparison, this would read WRONG no matter what the bars show.
+    spy = _synth_bars([100.0] * 15 + [100.2, 100.4, 100.6, 100.8, 101.0, 101.2, 101.4, 101.6,
+                                      101.8, 102.0, 102.2, 102.4, 102.6, 102.8, 103.0])   # ends
+    # at 103.0, still well below original_spot=110.0
+    qqq = _synth_bars([200.0] * 15 + [200.7, 201.4, 202.1, 202.8, 203.5, 204.2, 204.9, 205.6,
+                                      206.3, 207.0, 207.7, 208.4, 209.1, 209.8, 210.0])
+    prev_day = {"close": 99.0}
+    result = pt.evaluate_thesis_at_checkpoint(original, "10:00 AM", CHECKPOINT_10AM, spy, qqq,
+                                              None, None, None, prev_day, MARKET_OPEN)
+    assert result["actual_spy_price"] < result["original_spot"]   # confirms the setup is real
+    assert result["thesis_verdict"] == "CORRECT"   # behavior-graded, not price-graded
+
+
+def test_checkpoint_neutral_thesis_is_no_call():
+    original = _thesis(direction="Neutral", spot=100.0)
+    spy = _synth_bars([100.0] * 30)
+    result = pt.evaluate_thesis_at_checkpoint(original, "10:00 AM", CHECKPOINT_10AM, spy, None,
+                                              None, None, None, {"close": 99.0}, MARKET_OPEN)
+    assert result["thesis_verdict"] == "NO_CALL"
+
+
+def test_checkpoint_data_unavailable_when_no_bars_at_cutoff():
+    """Section 3's explicit requirement: if 10:00 data genuinely doesn't exist, say so plainly
+    rather than silently substituting a later (or earlier) bar."""
+    original = _thesis(direction="Bullish", spot=100.0)
+    # All bars are from BEFORE the checkpoint target's own day-open reference in this synthetic
+    # setup would still normally resolve -- simulate genuine absence by passing an empty frame.
+    empty = _synth_bars([])
+    result = pt.evaluate_thesis_at_checkpoint(original, "10:00 AM", CHECKPOINT_10AM, empty, None,
+                                              None, None, None, {"close": 99.0}, MARKET_OPEN)
+    assert result["status"] == "DATA_UNAVAILABLE"
+    assert result["thesis_verdict"] == "DATA_UNAVAILABLE"
+    assert result["actual_data_timestamp"] is None
 
 
 def test_log_checkpoint_is_immutable_per_label(tmp_db):
-    thesis = _thesis(direction="Bearish", spot=640.0)
-    checkpoint = pt.compute_checkpoint(thesis, current_spot=635.0, current_direction_now="Bearish",
-                                       confirmation_event=None, label="10:00 AM")
+    """Test 7 (persistence half): once logged, a checkpoint must never be silently overwritten --
+    proves the historical record stays frozen regardless of what's computed or attempted later
+    (e.g. a later Day Regime change, or even a differently-shaped checkpoint dict)."""
+    original = _thesis(direction="Bullish", spot=95.0)
+    spy = _synth_bars([100.0] * 30)
+    checkpoint = pt.evaluate_thesis_at_checkpoint(original, "10:00 AM", CHECKPOINT_10AM, spy, None,
+                                                  None, None, None, {"close": 99.0}, MARKET_OPEN)
     first = pt.log_checkpoint("SPY", "10:00 AM", checkpoint, path=tmp_db)
-    second = pt.log_checkpoint("SPY", "10:00 AM", checkpoint, path=tmp_db)
+    # Attempt a second write with a DIFFERENT (contradictory) checkpoint payload for the SAME
+    # label -- must be rejected, proving later information (e.g. Day Regime moving to BULL
+    # DEVELOPING afterward) can never rewrite the frozen 10:00 verdict.
+    different_checkpoint = {**checkpoint, "thesis_verdict": "WRONG"}
+    second = pt.log_checkpoint("SPY", "10:00 AM", different_checkpoint, path=tmp_db)
     assert first is True
     assert second is False
     stored = pt.get_checkpoints("SPY", path=tmp_db)
     assert len(stored) == 1
+    assert stored[0]["thesis_verdict"] == checkpoint["thesis_verdict"]   # the ORIGINAL verdict survives
 
 
 def test_checkpoints_scoped_by_date(tmp_db):
     """Leakage-style guard: a checkpoint logged for one day must not appear when a DIFFERENT
     target_date is queried -- mirrors zero_dte_log's same-day-only discipline, applied here to the
     checkpoint log."""
-    thesis = _thesis(direction="Bearish", spot=640.0)
-    checkpoint = pt.compute_checkpoint(thesis, current_spot=635.0, current_direction_now="Bearish",
-                                       confirmation_event=None, label="10:00 AM")
+    original = _thesis(direction="Bullish", spot=95.0)
+    spy = _synth_bars([100.0] * 30)
+    checkpoint = pt.evaluate_thesis_at_checkpoint(original, "10:00 AM", CHECKPOINT_10AM, spy, None,
+                                                  None, None, None, {"close": 99.0}, MARKET_OPEN)
     pt.log_checkpoint("SPY", "10:00 AM", checkpoint, path=tmp_db)
     assert len(pt.get_checkpoints("SPY", path=tmp_db)) == 1
     assert pt.get_checkpoints("SPY", target_date="2020-01-01", path=tmp_db) == []

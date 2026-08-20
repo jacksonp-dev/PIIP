@@ -51,6 +51,28 @@ never let it return an alternate score.
 DELIBERATELY NOT IN THIS PHASE (per user instruction — added only if evidence justifies it later):
 gold, real S&P-500-wide breadth (the existing basket proxy is used as-is), the LLM narrative
 layer, and the AI Thesis History / accuracy-dashboard page.
+
+LIVE vs HISTORICAL, kept ARCHITECTURALLY SEPARATE (PIIP audit 2026-08, fixing a real contamination
+bug found in production — see project chat history for the full incident): this module has two
+genuinely different questions in play, and they must never share a code path:
+
+  LIVE: "What does the confirmation engine say about the market RIGHT NOW?" — answered by
+  log_confirmation_event_once()/get_confirmation_event() (the premarket_confirmation_log table),
+  computed every ~30s in app.py from whatever direction the CURRENT live thesis recompute shows.
+  This is legitimate and stays exactly as it was — it is NOT being removed or weakened.
+
+  HISTORICAL: "Was the ORIGINAL immutable morning thesis correct, based on what actually happened
+  between the open and a specific checkpoint time?" — answered ONLY by
+  evaluate_thesis_at_checkpoint(), which is fully self-contained: it re-slices the SAME already-
+  fetched intraday bars to an as-of cutoff and re-runs confirmation_conditions()/
+  invalidation_conditions() for the ORIGINAL thesis's OWN direction against that as-of snapshot.
+  It NEVER reads spy_snap["last"] (today's live quote), and it NEVER reads the live confirmation-
+  event log above — a live 9:55 Bearish confirmation event is real and useful information about
+  the CURRENT state, but it is not evidence about whether the ORIGINAL 8:45 Bullish thesis was
+  right, and treating it as such was exactly the bug: a later live recompute's confirmation could
+  silently attach itself to the original thesis's grade. The checkpoint computes its own
+  "opposing pressure" reading (confirmation_conditions() run for the OPPOSITE direction, against
+  the SAME as-of snapshot) as a clearly-separate field instead.
 """
 from __future__ import annotations
 
@@ -62,6 +84,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import yfinance as yf
 
+from . import deterministic as det
 from . import zero_dte as zd
 
 DB_PATH = "iip.db"
@@ -498,67 +521,164 @@ def get_confirmation_event(ticker: str, path: str = DB_PATH) -> dict | None:
 
 # ------------------------------------------------------------------ checkpoint (grading) ----------
 
-def compute_checkpoint(original_thesis: dict, current_spot: float, current_direction_now: str,
-                       confirmation_event: dict | None, label: str,
-                       market_open_et: datetime | None = None) -> dict:
-    """Grades the ORIGINAL (read-only) thesis against what's actually happened -- three SEPARATE
-    measures per the user's explicit correction to a coarser 'was it right?' checkpoint:
+def _bars_at_or_before(df: pd.DataFrame | None, cutoff_et: datetime) -> pd.DataFrame | None:
+    if df is None or df.empty:
+        return df
+    return df[df.index <= pd.Timestamp(cutoff_et)]
 
-    1. Directional accuracy: did price actually move the predicted direction (CORRECT/WRONG/
-       FLAT), from spot_price at generation vs spot now. Purely mechanical.
-    2. Confirmation status now (CONFIRMED/PARTIAL/NOT CONFIRMED) -- reuses confirmation_conditions
-       ()'s own status, not re-derived here.
-    3. Tradeability: EXCELLENT/GOOD/POOR/NONE, from confirmation_event's timestamp (if any) --
-       how long after the open did confirmation actually first trigger, not just whether it did.
 
-    HONESTY LIMIT, stated explicitly rather than silently overclaimed: this does NOT attempt to
-    grade whether the specific SCENARIO/path matched (e.g. 'gradual decline' vs 'accelerated
-    selloff') -- that needs a natural-language match against the thesis text this deterministic
-    phase doesn't generate yet (see module docstring: the LLM narrative layer is a later phase).
-    What's graded here is mechanical: direction, confirmation, and time-to-confirmation."""
+def snapshot_as_of(intraday_df: pd.DataFrame | None, cutoff_et: datetime) -> dict | None:
+    """A det.intraday_snapshot()-shaped reconstruction using ONLY bars at/before `cutoff_et` --
+    the as-of, historical counterpart to the live snapshot this page uses premarket. None if no
+    bars exist at/before the cutoff (data gap, or the session hasn't reached that time yet) --
+    callers must show DATA UNAVAILABLE explicitly, never silently substitute a later bar or
+    today's live quote. The returned dict carries `_actual_data_timestamp` (the real timestamp
+    of the last bar actually used) so a caller can always show target-vs-actual honestly."""
+    bars = _bars_at_or_before(intraday_df, cutoff_et)
+    if bars is None or bars.empty:
+        return None
+    snap = det.intraday_snapshot(bars)
+    if snap is None:
+        return None
+    snap["_actual_data_timestamp"] = bars.index[-1].isoformat()
+    return snap
+
+
+def _first_confirmed_bar(direction: str, spy_intraday_df: pd.DataFrame | None,
+                         qqq_intraday_df: pd.DataFrame | None, market_open_et: datetime,
+                         cutoff_et: datetime) -> datetime | None:
+    """Scans SPY's own 1-minute bars from `market_open_et` through `cutoff_et` (inclusive),
+    re-evaluating confirmation_conditions() for `direction` at EACH bar using only data available
+    as of that bar -- returns the timestamp of the FIRST bar where status reached CONFIRMED, or
+    None if it never did by the cutoff. Deliberately independent of the live confirmation-event
+    log (premarket_confirmation_log) -- see module docstring's LIVE vs HISTORICAL section for why
+    that log is the wrong source of truth for this. Cheap: ~30 in-memory pandas slices for a
+    9:30-10:00 window, no network calls."""
+    if spy_intraday_df is None or spy_intraday_df.empty:
+        return None
+    window = spy_intraday_df[(spy_intraday_df.index >= pd.Timestamp(market_open_et)) &
+                             (spy_intraday_df.index <= pd.Timestamp(cutoff_et))]
+    for ts in window.index:
+        snap = snapshot_as_of(spy_intraday_df, ts)
+        if snap is None:
+            continue
+        qqq_snap = snapshot_as_of(qqq_intraday_df, ts) if qqq_intraday_df is not None else None
+        qqq_rel = (round(qqq_snap["day_change_pct"] - snap["day_change_pct"], 3)
+                  if qqq_snap else None)
+        or_status = zd.opening_range(_bars_at_or_before(spy_intraday_df, ts), minutes=15)
+        conf = confirmation_conditions(direction, snap, or_status, qqq_rel)
+        if conf["status"] == "CONFIRMED":
+            return ts.to_pydatetime()
+    return None
+
+
+def evaluate_thesis_at_checkpoint(original_thesis: dict, label: str, target_time_et: datetime,
+                                  spy_intraday_df: pd.DataFrame | None,
+                                  qqq_intraday_df: pd.DataFrame | None,
+                                  iwm_intraday_df: pd.DataFrame | None,
+                                  dia_intraday_df: pd.DataFrame | None,
+                                  vix_intraday_df: pd.DataFrame | None,
+                                  prev_day: dict | None, market_open_et: datetime) -> dict:
+    """The IMMUTABLE checkpoint (e.g. '10:00 AM'): answers 'was the ORIGINAL morning thesis
+    correct, based on what actually happened between the open and `target_time_et`' -- NEVER 'what
+    does the engine currently say.' Fully self-contained from historical intraday bars sliced to
+    `target_time_et`: does NOT read today's live quote, and does NOT read the live confirmation-
+    event log (see module docstring's LIVE vs HISTORICAL section for why that log is the wrong
+    source of truth for grading an immutable thesis -- a later live recompute's confirmation must
+    never silently attach to the original thesis's grade).
+
+    Reuses ONLY existing primitives -- confirmation_conditions()/invalidation_conditions() (run
+    for the ORIGINAL direction AND, separately, the opposing direction, both against the SAME
+    as-of snapshot), zero_dte.opening_range(), det.intraday_snapshot() -- never a new indicator.
+
+    Returns a dict with `status` ("OK" or "DATA_UNAVAILABLE") and, when OK, `thesis_verdict`
+    (CORRECT / PARTIALLY_CORRECT / WRONG / TOO_EARLY_TO_TELL / NO_CALL) plus every field needed
+    to reconstruct why -- see the return statement for the full shape."""
     orig_direction = original_thesis["market_state"]["direction"]
+    orig_confidence = original_thesis["market_state"]["confidence"]
     orig_spot = original_thesis.get("spot_price")
 
+    snap = snapshot_as_of(spy_intraday_df, target_time_et)
+    if snap is None:
+        return {"label": label, "status": "DATA_UNAVAILABLE",
+               "target_checkpoint_time": target_time_et.isoformat(), "actual_data_timestamp": None,
+               "original_direction": orig_direction, "original_confidence": orig_confidence,
+               "original_spot": orig_spot, "thesis_verdict": "DATA_UNAVAILABLE",
+               "tradeability": "NONE",
+               "tradeability_reason": "No intraday data available as of the checkpoint time."}
+
+    actual_ts = snap.pop("_actual_data_timestamp")
+    qqq_snap = snapshot_as_of(qqq_intraday_df, target_time_et) if qqq_intraday_df is not None else None
+    qqq_rel = (round(qqq_snap["day_change_pct"] - snap["day_change_pct"], 3) if qqq_snap else None)
+    or15 = zd.opening_range(_bars_at_or_before(spy_intraday_df, target_time_et), minutes=15)
+    iwm_snap = snapshot_as_of(iwm_intraday_df, target_time_et) if iwm_intraday_df is not None else None
+    dia_snap = snapshot_as_of(dia_intraday_df, target_time_et) if dia_intraday_df is not None else None
+    vix_snap = snapshot_as_of(vix_intraday_df, target_time_et) if vix_intraday_df is not None else None
+
+    base = {"label": label, "status": "OK",
+           "target_checkpoint_time": target_time_et.isoformat(), "actual_data_timestamp": actual_ts,
+           "original_direction": orig_direction, "original_confidence": orig_confidence,
+           "original_spot": orig_spot, "actual_spy_price": snap.get("last"),
+           "actual_spy_change_from_open": (round((snap["last"] / snap["open"] - 1) * 100, 3)
+                                           if snap.get("open") else None),
+           "vwap_relationship": {"vwap": (round(snap["vwap"], 2) if snap.get("vwap") else None),
+                                 "pct_from_vwap": snap.get("pct_from_vwap")},
+           "opening_range_behavior": or15, "qqq_relative_strength_pct": qqq_rel,
+           "iwm_change_pct": iwm_snap.get("day_change_pct") if iwm_snap else None,
+           "dia_change_pct": dia_snap.get("day_change_pct") if dia_snap else None,
+           "vix_change_pct": vix_snap.get("day_change_pct") if vix_snap else None}
+
     if orig_direction == "Neutral":
-        directional_accuracy = "NO_CALL"
-    elif orig_spot is None or current_spot is None:
-        directional_accuracy = "UNKNOWN"
+        return {**base, "thesis_verdict": "NO_CALL",
+               "expected_behavior": "No directional thesis was issued (Neutral) — nothing to grade.",
+               "confirmation": None, "invalidation": None, "opposing_direction": None,
+               "opposing_pressure": None, "tradeability": "NONE",
+               "tradeability_reason": "No directional thesis to trade."}
+
+    confirmation = confirmation_conditions(orig_direction, snap, or15, qqq_rel)
+    invalidation = invalidation_conditions(orig_direction, snap, prev_day)
+    opposing_direction = "Bearish" if orig_direction == "Bullish" else "Bullish"
+    opposing_confirmation = confirmation_conditions(opposing_direction, snap, or15, qqq_rel)
+    opposing_pressure = {"NOT CONFIRMED": "NONE", "PARTIAL": "DEVELOPING",
+                        "CONFIRMED": "CONFIRMED"}[opposing_confirmation["status"]]
+
+    # Deterministic verdict -- priority-ordered, never AI-determined (per explicit requirement).
+    if invalidation["status"] == "INVALIDATED" or opposing_pressure == "CONFIRMED":
+        verdict = "WRONG"
+    elif (confirmation["status"] == "CONFIRMED" and invalidation["status"] == "INTACT"
+          and opposing_pressure == "NONE"):
+        verdict = "CORRECT"
+    elif (confirmation["status"] == "NOT CONFIRMED" and invalidation["status"] == "INTACT"
+          and opposing_pressure == "NONE"):
+        verdict = "TOO_EARLY_TO_TELL"
     else:
-        moved_up = current_spot > orig_spot
-        if current_spot == orig_spot:
-            directional_accuracy = "FLAT"
-        elif (orig_direction == "Bullish" and moved_up) or (orig_direction == "Bearish" and not moved_up):
-            directional_accuracy = "CORRECT"
-        else:
-            directional_accuracy = "WRONG"
+        verdict = "PARTIALLY_CORRECT"
 
-    tradeability, tradeability_reason = "NONE", "Never confirmed."
-    if orig_direction in ("Bullish", "Bearish"):
-        if confirmation_event is None:
-            tradeability, tradeability_reason = "NONE", "Confirmation never triggered today."
-        elif confirmation_event["direction"] != orig_direction:
-            tradeability = "NONE"
-            tradeability_reason = (f"Confirmation triggered for {confirmation_event['direction']}, "
-                                   f"opposite of the original {orig_direction} thesis.")
-        elif market_open_et is not None:
-            confirmed_ts = pd.Timestamp(confirmation_event["ts"])
-            minutes_to_confirm = (confirmed_ts - pd.Timestamp(market_open_et)).total_seconds() / 60
-            if minutes_to_confirm <= 20:
-                tradeability = "EXCELLENT"
-            elif minutes_to_confirm <= 60:
-                tradeability = "GOOD"
-            else:
-                tradeability = "POOR"
-            tradeability_reason = f"Confirmed {minutes_to_confirm:.0f} min after the open."
-        else:
-            tradeability, tradeability_reason = "GOOD", "Confirmed (exact timing unavailable)."
+    first_confirmed_ts = _first_confirmed_bar(orig_direction, spy_intraday_df, qqq_intraday_df,
+                                              market_open_et, target_time_et)
+    if first_confirmed_ts is None:
+        tradeability, tradeability_reason = ("NONE", "The original thesis's own confirmation "
+                                             "conditions were not met by the checkpoint time.")
+    else:
+        minutes_to_confirm = (first_confirmed_ts - market_open_et).total_seconds() / 60
+        tradeability = ("EXCELLENT" if minutes_to_confirm <= 20 else
+                        "GOOD" if minutes_to_confirm <= 60 else "POOR")
+        tradeability_reason = (f"The original thesis's own confirmation conditions were first "
+                               f"met {minutes_to_confirm:.0f} min after the open.")
 
-    return {"label": label, "original_direction": orig_direction,
-           "original_confidence": original_thesis["market_state"]["confidence"],
-           "original_spot": orig_spot, "current_spot": current_spot,
-           "current_direction": current_direction_now,
-           "directional_accuracy": directional_accuracy,
-           "tradeability": tradeability, "tradeability_reason": tradeability_reason}
+    expected_behavior = (", ".join(name for name, _ in confirmation["checks"])
+                         if confirmation["checks"] else "N/A")
+
+    return {**base, "expected_behavior": expected_behavior,
+           "confirmation": {"status": confirmation["status"], "checks": confirmation["checks"],
+                            "confirmed_count": confirmation["confirmed_count"],
+                            "total": confirmation["total"]},
+           "invalidation": {"status": invalidation["status"], "checks": invalidation["checks"],
+                            "invalidated_count": invalidation["invalidated_count"],
+                            "total": invalidation["total"]},
+           "opposing_direction": opposing_direction, "opposing_pressure": opposing_pressure,
+           "thesis_verdict": verdict, "tradeability": tradeability,
+           "tradeability_reason": tradeability_reason}
 
 
 def log_checkpoint(ticker: str, label: str, checkpoint: dict, thesis_id: int | None = None,

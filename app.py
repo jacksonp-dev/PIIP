@@ -3265,12 +3265,23 @@ def _compute_premarket_thesis(index_snaps: dict, vix_snap: dict | None, particip
 
     # 10:00 AM checkpoint -- idempotent past the cutoff, only the first attempt after 10:00 ET
     # actually persists (schema-enforced), so calling this every refresh past that time is safe.
+    # PIIP audit 2026-08 (fixed a real production bug): evaluate_thesis_at_checkpoint() is fully
+    # self-contained from historical intraday bars pinned to a FIXED 10:00 ET target -- it never
+    # reads spy_snap["last"] (today's live quote, which is whatever time this happens to run) and
+    # never reads the live confirmation-event log (which tracks live confirmation for whatever
+    # direction is CURRENTLY live, a genuinely different question -- see
+    # iip/premarket_thesis.py's module docstring for the full LIVE vs HISTORICAL rationale). This
+    # is what makes "delayed execution" (running at 10:17) still grade against real 10:00 data,
+    # and what stops a later live Bearish confirmation from silently attaching to an original
+    # Bullish thesis's grade.
     if original and now_et.time() >= dtime(10, 0):
         try:
-            confirmation_event = pt.get_confirmation_event("SPY")
             market_open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-            checkpoint = pt.compute_checkpoint(original, spy_snap["last"], direction,
-                                               confirmation_event, "10:00 AM", market_open_et)
+            checkpoint_target_et = now_et.replace(hour=10, minute=0, second=0, microsecond=0)
+            checkpoint = pt.evaluate_thesis_at_checkpoint(
+                original, "10:00 AM", checkpoint_target_et, intraday.get("SPY"),
+                intraday.get("QQQ"), intraday.get("IWM"), intraday.get("DIA"),
+                intraday.get("^VIX"), prev_day, market_open_et)
             pt.log_checkpoint("SPY", "10:00 AM", checkpoint, thesis_id=original.get("_thesis_id"))
         except Exception:
             pass
@@ -3340,10 +3351,33 @@ def _render_thesis_column(pt_data: dict) -> None:
             pass
         with st.expander(f"{len(checkpoints)} checkpoint(s) logged" if checkpoints else "No checkpoint yet"):
             st.caption("Handed off to Day Regime once real intraday data existed — this is a "
-                      "reference to the morning's original (immutable) read, not a live score.")
+                      "reference to the morning's original (immutable) read, not a live score. "
+                      "Each checkpoint below is an IMMUTABLE historical grade of the ORIGINAL "
+                      "thesis, computed once from as-of intraday data — it never changes later, "
+                      "and it's a separate question from what Day Regime says right now.")
             for cp in checkpoints:
-                st.write(f"**{cp['label']}** — direction: {cp['directional_accuracy']} · "
-                        f"tradeability: {cp['tradeability']} ({cp['tradeability_reason']})")
+                if cp.get("status") == "DATA_UNAVAILABLE":
+                    st.write(f"**{cp['label']}** — DATA UNAVAILABLE "
+                            "(no intraday bars as of the checkpoint time).")
+                    continue
+                verdict = cp.get("thesis_verdict", "UNKNOWN")
+                verdict_emoji = {"CORRECT": "🟢", "PARTIALLY_CORRECT": "🟡", "WRONG": "🔴",
+                                "TOO_EARLY_TO_TELL": "⚪", "NO_CALL": "⚪"}.get(verdict, "⚪")
+                st.markdown(f"**{cp['label']} — {verdict_emoji} {verdict.replace('_', ' ')}**")
+                if cp.get("confirmation"):
+                    st.write(f"Original {cp['original_direction']} confirmation: "
+                            f"{cp['confirmation']['status']} "
+                            f"({cp['confirmation']['confirmed_count']}/{cp['confirmation']['total']})")
+                if cp.get("invalidation"):
+                    st.write(f"Original {cp['original_direction']} invalidation: "
+                            f"{cp['invalidation']['status']} "
+                            f"({cp['invalidation']['invalidated_count']}/{cp['invalidation']['total']})")
+                if cp.get("opposing_pressure"):
+                    st.write(f"Opposing pressure ({cp['opposing_direction']}): "
+                            f"{cp['opposing_pressure']}")
+                st.write(f"Tradeability: {cp['tradeability']} — {cp['tradeability_reason']}")
+                st.caption(f"Data as of: {cp.get('actual_data_timestamp') or 'unknown'} "
+                          f"(target: {cp.get('target_checkpoint_time') or 'unknown'})")
             if not checkpoints:
                 st.caption("First one fires at 10:00 ET.")
 
