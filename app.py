@@ -2893,7 +2893,7 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str,
                           "now": _et_seconds(now_et)})
     html = f"""
 <div id="{chart_id}_legend" style="font-family:ui-monospace,Consolas,monospace;font-size:0.78rem;
-     color:#e8ecec;margin-bottom:0.3rem;min-height:1.2em;">Loading…</div>
+     color:#e8ecec;margin-bottom:0.3rem;height:2.8em;overflow:hidden;">Loading…</div>
 <div id="{chart_id}" style="width:100%;height:{chart_px}px;"></div>
 <script>{_load_lightweight_charts_js()}</script>
 <script>
@@ -3015,7 +3015,13 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str,
         if (dist <= nearestDist) {{ nearest = line; nearestDist = dist; }}
       }});
       if (nearest) {{
-        html += `<div style="margin-top:0.2rem;color:${{nearest.color}}">${{nearest.detail}}</div>`;
+        // white-space:nowrap + ellipsis -- the legend box has a FIXED height (see the container's
+        // own style) specifically so this line appearing/disappearing never resizes it and shifts
+        // the chart under the cursor (a real bug the user hit: the legend growing by a line pushed
+        // the chart down, moving the mouse off the very line it was hovering). A long detail
+        // string truncates cleanly instead of wrapping into a second line that would defeat that.
+        html += `<div style="margin-top:0.2rem;color:${{nearest.color}};white-space:nowrap;`
+          + `overflow:hidden;text-overflow:ellipsis">${{nearest.detail}}</div>`;
       }}
     }}
     legend.innerHTML = html;
