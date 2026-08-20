@@ -3109,7 +3109,11 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str,
 }})();
 </script>
 """
-    st.iframe(html, height=chart_px + 30)
+    # +45 (was +30) -- the legend strip grew from a 1-line min-height:1.2em to a fixed
+    # height:2.8em (~35px) + margin-bottom:0.3rem (~5px) when the Market Structure Map hover
+    # detail line was added, so the old +30 buffer started clipping ~10px short and produced a
+    # real vertical scrollbar inside the iframe -- reported directly by the user.
+    st.iframe(html, height=chart_px + 45)
     st.caption(f"{tf_choice} candles · {len(cdf)} bars · scroll/pinch to zoom, drag to pan — "
               "price auto-fits the visible range · refreshes every 30s with the rest of this page.")
 
