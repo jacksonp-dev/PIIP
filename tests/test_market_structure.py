@@ -7,9 +7,13 @@ PIIP audit 2026-08, 0DTE Market Structure Map.
 """
 from __future__ import annotations
 
+import gc
 import json
 import os
 import sys
+import tempfile
+import time
+import uuid
 from datetime import date, datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -22,6 +26,20 @@ from iip import market_structure as ms
 
 ET = ZoneInfo("America/New_York")
 TODAY = date.today()
+
+
+@pytest.fixture
+def tmp_db():
+    path = os.path.join(tempfile.gettempdir(), f"test_piip_market_structure_{uuid.uuid4().hex}.db")
+    yield path
+    gc.collect()
+    for _ in range(5):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+            break
+        except PermissionError:
+            time.sleep(0.1)
 
 
 def _bars(rows: list[tuple], start: dtime = dtime(9, 30)) -> pd.DataFrame:
@@ -337,52 +355,100 @@ def test_expected_range_insufficient_data_no_metrics():
     assert ms.expected_range(None, {"expected_move_straddle_pct": 1.0})["status"] == "INSUFFICIENT_DATA"
 
 
-# ---------- stabilize_expected_range ----------
+# ---------- expected-range persistence: frozen once per (ticker, day) ----------
+#
+# Per direct user feedback: the Expected High/Low band must NOT recompute/re-center on every
+# refresh (that defeats its purpose as a stable reference range) -- it's frozen the first time
+# it's computed each day and held fixed, the same immutable-once-per-day pattern
+# premarket_thesis.py already uses for the morning thesis.
 
-def test_stabilize_expected_range_ignores_small_change():
-    prev = {"status": "OK", "expected_high": 105.0, "expected_low": 95.0}
-    new = {"status": "OK", "expected_high": 105.01, "expected_low": 95.01}
-    result, updated = ms.stabilize_expected_range(new, prev, min_change_pct=0.05)
-    assert updated is False
-    assert result == prev
-
-
-def test_stabilize_expected_range_accepts_big_change():
-    prev = {"status": "OK", "expected_high": 105.0, "expected_low": 95.0}
-    new = {"status": "OK", "expected_high": 108.0, "expected_low": 92.0}
-    result, updated = ms.stabilize_expected_range(new, prev, min_change_pct=0.05)
-    assert updated is True
-    assert result == new
+def _om(move_pct=1.2):
+    return {"expected_move_straddle_pct": move_pct, "expected_move_iv_pct": move_pct + 0.2,
+           "expiry": TODAY.isoformat(), "dte_days": 1}
 
 
-def test_stabilize_expected_range_first_call_always_updates():
-    new = {"status": "OK", "expected_high": 105.0, "expected_low": 95.0}
-    result, updated = ms.stabilize_expected_range(new, None)
-    assert updated is True
-    assert result == new
+def test_log_expected_range_once_first_write_succeeds(tmp_db):
+    rng = ms.expected_range(100.0, _om())
+    wrote = ms.log_expected_range_once("SPY", rng, spot_at_calc=100.0, path=tmp_db)
+    assert wrote is True
 
 
-# ---------- build_structure_map: end-to-end, JSON-serializable ----------
+def test_log_expected_range_once_second_write_same_day_is_noop(tmp_db):
+    rng1 = ms.expected_range(100.0, _om(move_pct=1.0))
+    ms.log_expected_range_once("SPY", rng1, spot_at_calc=100.0, path=tmp_db)
+    # A later, DIFFERENT computation (e.g. price and IV both moved) must not overwrite the first.
+    rng2 = ms.expected_range(150.0, _om(move_pct=5.0))
+    wrote_again = ms.log_expected_range_once("SPY", rng2, spot_at_calc=150.0, path=tmp_db)
+    assert wrote_again is False
 
-def test_build_structure_map_end_to_end_is_json_serializable():
+    frozen = ms.get_todays_expected_range("SPY", path=tmp_db)
+    assert frozen["expected_high"] == rng1["expected_high"]
+    assert frozen["expected_low"] == rng1["expected_low"]
+    assert frozen["spot_at_calc"] == 100.0
+
+
+def test_get_todays_expected_range_none_when_nothing_logged(tmp_db):
+    assert ms.get_todays_expected_range("SPY", path=tmp_db) is None
+
+
+def test_expected_range_scoped_per_ticker(tmp_db):
+    spy_rng = ms.expected_range(100.0, _om(move_pct=1.0))
+    qqq_rng = ms.expected_range(400.0, _om(move_pct=2.0))
+    ms.log_expected_range_once("SPY", spy_rng, 100.0, path=tmp_db)
+    ms.log_expected_range_once("QQQ", qqq_rng, 400.0, path=tmp_db)
+    assert ms.get_todays_expected_range("SPY", path=tmp_db)["expected_high"] == spy_rng["expected_high"]
+    assert ms.get_todays_expected_range("QQQ", path=tmp_db)["expected_high"] == qqq_rng["expected_high"]
+
+
+def test_log_expected_range_once_noop_for_insufficient_data(tmp_db):
+    bad_rng = {"status": "INSUFFICIENT_DATA"}
+    wrote = ms.log_expected_range_once("SPY", bad_rng, spot_at_calc=100.0, path=tmp_db)
+    assert wrote is False
+    assert ms.get_todays_expected_range("SPY", path=tmp_db) is None
+
+
+# ---------- build_structure_map: end-to-end, JSON-serializable, freezes expected_range ----------
+
+def test_build_structure_map_end_to_end_is_json_serializable(tmp_db):
     rows = [(100.0 + (i % 5) * 0.05, 100.3 + (i % 5) * 0.05, 99.7 + (i % 5) * 0.05,
             100.0 + (i % 5) * 0.05, 1000.0) for i in range(60)]
     df = _bars(rows)
     or15 = {"high": 100.5, "low": 99.5, "last": 100.1, "status": "Inside range"}
     prev_day = {"high": 101.0, "low": 98.0, "close": 99.8}
-    om = {"expected_move_straddle_pct": 1.2, "expected_move_iv_pct": 1.4,
-         "expiry": TODAY.isoformat(), "dte_days": 1}
+    om = _om(move_pct=1.2)
     result = ms.build_structure_map(df, spot=100.1, vwap=99.95, opening_range=or15,
-                                    prev_day=prev_day, option_metrics=om)
+                                    prev_day=prev_day, option_metrics=om, ticker="SPY", path=tmp_db)
     assert result["spot"] == 100.1
     assert result["expected_range"]["status"] == "OK"
     json.dumps(result, default=str)   # must never raise -- the circular-reference regression
 
 
-def test_build_structure_map_handles_missing_data_gracefully():
+def test_build_structure_map_handles_missing_data_gracefully(tmp_db):
     result = ms.build_structure_map(None, spot=None, vwap=None, opening_range=None,
-                                    prev_day=None, option_metrics=None)
+                                    prev_day=None, option_metrics=None, ticker="SPY", path=tmp_db)
     assert result["volume_profile"]["status"] == "INSUFFICIENT_DATA"
     assert result["expected_range"]["status"] == "INSUFFICIENT_DATA"
     assert result["zones"] == {"resistance": [], "support": []}
     json.dumps(result, default=str)
+
+
+def test_build_structure_map_freezes_expected_range_across_calls(tmp_db):
+    """The end-to-end proof: calling build_structure_map() twice in the same day, with a
+    DIFFERENT spot/option_metrics the second time (simulating price moving over the next 30s
+    refresh), must return the IDENTICAL expected_range both times -- it must not re-center."""
+    or15 = {"high": 100.5, "low": 99.5, "last": 100.1, "status": "Inside range"}
+    prev_day = {"high": 101.0, "low": 98.0, "close": 99.8}
+    df = _bars([(100.0, 100.3, 99.7, 100.0, 1000.0)] * 60)
+
+    first = ms.build_structure_map(df, spot=100.1, vwap=99.95, opening_range=or15,
+                                   prev_day=prev_day, option_metrics=_om(move_pct=1.0),
+                                   ticker="SPY", path=tmp_db)
+    second = ms.build_structure_map(df, spot=150.0, vwap=149.0, opening_range=or15,
+                                    prev_day=prev_day, option_metrics=_om(move_pct=8.0),
+                                    ticker="SPY", path=tmp_db)
+    assert first["expected_range"]["expected_high"] == second["expected_range"]["expected_high"]
+    assert first["expected_range"]["expected_low"] == second["expected_range"]["expected_low"]
+    # The rest of the structure (zones, VWAP, spot) DOES still update live -- only the expected
+    # range is frozen.
+    assert first["spot"] == 100.1
+    assert second["spot"] == 150.0

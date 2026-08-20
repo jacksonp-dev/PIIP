@@ -2756,9 +2756,13 @@ def _structure_price_lines(structure: dict | None) -> list[dict]:
         lines.append({"price": profile["poc"], "color": "#c792ea", "title": "POC", "detail": detail})
     exp = structure.get("expected_range") or {}
     if exp.get("status") == "OK":
+        frozen_note = (f" Frozen at {exp['frozen_at'][11:16]} ET (spot {exp['spot_at_calc']:.2f} "
+                       f"at calc time) — held fixed for the rest of the day, not re-centered on "
+                       f"the current price." if exp.get("frozen_at") else "")
         base_detail = (f"STATISTICAL range estimate from the options market's own implied move "
                        f"({exp['method']}-based, {exp['expiry']} expiry, {exp['dte_days']}d to "
-                       f"expiry): +/-{exp['move_pct']:.2f}% from spot. NOT a guaranteed target.")
+                       f"expiry): +/-{exp['move_pct']:.2f}% from spot AT THE TIME IT WAS FIRST "
+                       f"COMPUTED today.{frozen_note} NOT a guaranteed target.")
         lines.append({"price": exp["expected_high"], "color": "#8b9a9d", "title": "Exp High",
                      "detail": "EXPECTED HIGH — " + base_detail})
         lines.append({"price": exp["expected_low"], "color": "#8b9a9d", "title": "Exp Low",
@@ -3588,12 +3592,16 @@ def _render_market_structure_map(structure: dict | None, ticker: str) -> None:
         exp = structure.get("expected_range") or {}
 
         # Right-side-style scenario ladder (per spec section 19/24): highest price at top.
+        exp_frozen_note = (f" Frozen at {exp['frozen_at'][11:16]} ET (spot {exp['spot_at_calc']:.2f} "
+                          f"at calc time) — held fixed for the rest of the day."
+                          if exp.get("frozen_at") else "")
         rows = []
         if exp.get("status") == "OK":
             rows.append(("EXPECTED HIGH", exp["expected_high"], "#8b9a9d",
                         f"STATISTICAL range estimate from the options market's own implied move "
                         f"({exp['method']}-based, {exp['expiry']} expiry, {exp['dte_days']}d to "
-                        f"expiry): +/-{exp['move_pct']:.2f}% from spot. NOT a guaranteed target."))
+                        f"expiry): +/-{exp['move_pct']:.2f}% from spot AT THE TIME IT WAS FIRST "
+                        f"COMPUTED today.{exp_frozen_note} NOT a guaranteed target."))
         for i, z in enumerate(resistances):
             label = _zone_state_label(z["state"]["state"], "resistance") if i == 0 else "NEXT RESISTANCE"
             tip = (f"Structural factors ({z['n_factors']}): {', '.join(z['contributors'])}. "
@@ -3615,8 +3623,9 @@ def _render_market_structure_map(structure: dict | None, ticker: str) -> None:
         if exp.get("status") == "OK":
             rows.append(("EXPECTED LOW", exp["expected_low"], "#8b9a9d",
                         f"STATISTICAL range estimate from the options market's own implied move "
-                        f"({exp['method']}-based): +/-{exp['move_pct']:.2f}% from spot. NOT a "
-                        f"guaranteed target."))
+                        f"({exp['method']}-based): +/-{exp['move_pct']:.2f}% from spot AT THE "
+                        f"TIME IT WAS FIRST COMPUTED today.{exp_frozen_note} NOT a guaranteed "
+                        f"target."))
 
         rows.sort(key=lambda r: -r[1])
         html = ['<div style="font-family:ui-monospace,Consolas,monospace;font-size:0.85rem">']
@@ -4217,7 +4226,7 @@ def _render_zero_dte(ticker: str):
             except Exception:
                 om_for_structure = None
         structure = ms.build_structure_map(intraday.get(ticker), snap["last"], snap.get("vwap"),
-                                           or15, prev_day, om_for_structure)
+                                           or15, prev_day, om_for_structure, ticker=ticker)
 
         with st.container(border=True):
             st.markdown(f"**📊 Intraday Chart — {ticker}**")

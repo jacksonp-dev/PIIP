@@ -13,7 +13,14 @@ HONESTY NOTES (per the spec's own explicit instructions):
   precision.
 - Expected High/Low REUSES det.option_metrics()'s existing options-implied expected move (the
   same 0DTE chain already fetched on this page) rather than inventing a new statistical range
-  model, per the spec's own explicit "reuse existing methodology" instruction.
+  model, per the spec's own explicit "reuse existing methodology" instruction. FROZEN ONCE PER
+  (ticker, day) -- per direct user feedback: recomputing this every 30s re-centers the band on
+  whatever the CURRENT price happens to be, which defeats its entire purpose as a stable
+  reference range that the day's actual price action is compared against. The first successful
+  computation each day is persisted (log_expected_range_once()) and reused for the rest of the
+  session, the same immutable-once-per-day pattern premarket_thesis.py already uses for the
+  morning thesis itself. Honest limitation: "beginning of the day" means the first time this
+  code actually runs that day, not literally 9:30 ET if the app wasn't running yet.
 - Every threshold below (clustering tolerance, HVN/LVN peak detection, acceptance confirm-bar
   count, approaching distance) is a first-pass, uncalibrated guess -- same honesty standard as
   every other unvalidated threshold in this codebase (premarket_thesis.py, market_dna.py, etc.).
@@ -22,10 +29,30 @@ HONESTY NOTES (per the spec's own explicit instructions):
 """
 from __future__ import annotations
 
-from datetime import date
+import sqlite3
+from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
+
+DB_PATH = "iip.db"
+
+EXPECTED_RANGE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS market_structure_expected_range (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  date TEXT NOT NULL,
+  ticker TEXT NOT NULL,
+  expected_high REAL,
+  expected_low REAL,
+  move_pct REAL,
+  method TEXT,
+  expiry TEXT,
+  dte_days INTEGER,
+  spot_at_calc REAL,
+  UNIQUE(date, ticker)
+);
+"""
 
 MIN_BARS_FOR_PROFILE = 15
 MIN_BARS_FOR_SWINGS = 11   # 2*lookback(5) + 1
@@ -395,15 +422,69 @@ def expected_range(spot: float | None, option_metrics: dict | None) -> dict:
            "dte_days": option_metrics.get("dte_days")}
 
 
+# ------------------------------------------------------------------ expected-range persistence ----------
+
+def _connect(path: str = DB_PATH) -> sqlite3.Connection:
+    con = sqlite3.connect(path)
+    con.executescript(EXPECTED_RANGE_SCHEMA)
+    return con
+
+
+def log_expected_range_once(ticker: str, rng: dict, spot_at_calc: float | None,
+                            path: str = DB_PATH) -> bool:
+    """Freezes today's Expected High/Low for `ticker` -- write-once (INSERT OR IGNORE,
+    UNIQUE(date, ticker)), the same immutable-once-per-day pattern
+    premarket_thesis.log_thesis_once() already uses for the morning thesis. No-op (returns
+    False) if `rng` isn't a real OK result, or if today's range for this ticker is already
+    frozen. See module docstring for why this must be write-once, not recomputed."""
+    if rng.get("status") != "OK":
+        return False
+    now = datetime.now()
+    with _connect(path) as con:
+        cur = con.execute(
+            "INSERT OR IGNORE INTO market_structure_expected_range "
+            "(ts, date, ticker, expected_high, expected_low, move_pct, method, expiry, "
+            "dte_days, spot_at_calc) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (now.isoformat(timespec="seconds"), now.date().isoformat(), ticker,
+             rng["expected_high"], rng["expected_low"], rng["move_pct"], rng["method"],
+             rng.get("expiry"), rng.get("dte_days"), spot_at_calc))
+        return cur.rowcount > 0
+
+
+def get_todays_expected_range(ticker: str, path: str = DB_PATH) -> dict | None:
+    """Today's frozen Expected High/Low for `ticker`, or None if nothing's been computed yet
+    today (the caller should then compute fresh via expected_range() and persist it)."""
+    today = date.today().isoformat()
+    try:
+        con = _connect(path)
+        con.row_factory = sqlite3.Row
+        row = con.execute(
+            "SELECT * FROM market_structure_expected_range WHERE ticker=? AND date=?",
+            (ticker, today)).fetchone()
+        con.close()
+    except Exception:
+        return None
+    if not row:
+        return None
+    return {"status": "OK", "expected_high": row["expected_high"], "expected_low": row["expected_low"],
+           "move_pct": row["move_pct"], "method": row["method"], "expiry": row["expiry"],
+           "dte_days": row["dte_days"], "spot_at_calc": row["spot_at_calc"], "frozen_at": row["ts"]}
+
+
 # ------------------------------------------------------------------ orchestration ----------
 
 def build_structure_map(intraday_df: pd.DataFrame | None, spot: float | None, vwap: float | None,
                         opening_range: dict | None, prev_day: dict | None,
-                        option_metrics: dict | None, max_zones_each_side: int = 2) -> dict:
+                        option_metrics: dict | None, ticker: str = "SPY",
+                        max_zones_each_side: int = 2, path: str = DB_PATH) -> dict:
     """Assembles the full Market Structure Map from already-fetched/computed PIIP data -- the
-    ONE entry point the UI layer calls. Pure orchestration: every sub-piece above already does
-    its own work (and is independently testable); this just sequences them and packages the
-    result. Does NOT compute a new market-bias/direction number -- see module docstring."""
+    ONE entry point the UI layer calls. Every sub-piece above already does its own work (and is
+    independently testable); this sequences them and packages the result. Does NOT compute a new
+    market-bias/direction number -- see module docstring.
+
+    Expected High/Low is the one piece of real persistence here: today's frozen value for
+    `ticker` is reused if it already exists; otherwise it's computed fresh from `option_metrics`
+    and frozen for the rest of the day (see log_expected_range_once())."""
     profile = volume_profile(intraday_df)
     hvn_lvn = detect_hvn_lvn(profile)
     swings = swing_points(intraday_df)
@@ -418,28 +499,24 @@ def build_structure_map(intraday_df: pd.DataFrame | None, spot: float | None, vw
             z["state"] = zone_state(z, intraday_df, side)
             z["path"] = conditional_path(z, side, zones, spot) if spot else None
 
+    exp_range = None
+    try:
+        exp_range = get_todays_expected_range(ticker, path=path)
+    except Exception:
+        pass
+    if exp_range is None:
+        exp_range = expected_range(spot, option_metrics)
+        if exp_range.get("status") == "OK":
+            # Same fields get_todays_expected_range() would return on a later, persisted read --
+            # set here too so the very FIRST render of the day (before anything's persisted yet)
+            # shows an identical, consistent tooltip, not a briefly-different one.
+            exp_range = {**exp_range, "spot_at_calc": spot,
+                        "frozen_at": datetime.now().isoformat(timespec="seconds")}
+        try:
+            log_expected_range_once(ticker, exp_range, spot, path=path)
+        except Exception:
+            pass   # best-effort persistence -- still show today's freshly-computed value either way
+
     return {"spot": spot, "vwap": vwap, "ema50": ema50, "sma50": sma50,
            "volume_profile": profile, "hvn_lvn": hvn_lvn, "swings": swings,
-           "zones": classified, "expected_range": expected_range(spot, option_metrics)}
-
-
-def stabilize_expected_range(new_range: dict, prev_range: dict | None,
-                             min_change_pct: float = 0.05) -> tuple[dict, bool]:
-    """Debounces expected_range() so the displayed levels don't jitter on every small IV wiggle
-    -- only replaces the previously-displayed value if EITHER bound moved by more than
-    `min_change_pct`. Checks both bounds independently, not just the midpoint -- a symmetric
-    width change (e.g. IV expanding on both sides) leaves the midpoint exactly unchanged while
-    both real levels move, which this build's own test suite caught trying to verify a 'big
-    change' that a midpoint-only check would have silently missed entirely. Returns
-    (range_to_display, was_just_updated)."""
-    if new_range.get("status") != "OK":
-        return (prev_range or new_range), False
-    if not prev_range or prev_range.get("status") != "OK":
-        return new_range, True
-    old_hi, old_lo = prev_range["expected_high"], prev_range["expected_low"]
-    new_hi, new_lo = new_range["expected_high"], new_range["expected_low"]
-    hi_changed = old_hi != 0 and abs(new_hi - old_hi) / old_hi * 100 >= min_change_pct
-    lo_changed = old_lo != 0 and abs(new_lo - old_lo) / old_lo * 100 >= min_change_pct
-    if hi_changed or lo_changed:
-        return new_range, True
-    return prev_range, False
+           "zones": classified, "expected_range": exp_range}
