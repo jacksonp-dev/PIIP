@@ -36,9 +36,11 @@ from iip import glossary
 from iip import journal
 from iip import macro
 from iip import market_dna as mdna
+from iip import market_structure as ms
 from iip import portfolio
 from iip import premarket_ai as pai
 from iip import premarket_backtest as pbt
+from iip import premarket_catalysts as pc
 from iip import premarket_thesis as pt
 from iip import reddit_momentum as rm
 from iip import scanner
@@ -2717,8 +2719,32 @@ def _render_lightweight_lines(series: dict, key_prefix: str, colors: dict | None
     st.iframe(html, height=height + 30)
 
 
+def _structure_price_lines(structure: dict | None) -> list[dict]:
+    """The MINIMAL set of price lines to actually draw on the candlestick chart -- per the
+    spec's own 'do not draw every possible level' instruction: the 2 nearest resistance/support
+    zone midpoints, the volume POC, and the options-implied expected high/low. Every OTHER
+    structural fact (HVN/LVN, swing points, VAH/VAL, zone states, conditional paths) still lives
+    in the Market Structure Map panel below the chart -- this only decides what earns a line
+    directly on the price chart itself."""
+    if not structure:
+        return []
+    lines = []
+    for z in structure["zones"].get("resistance", []):
+        lines.append({"price": z["mid"], "color": "#ff8080", "title": f"R {z['n_factors']}x"})
+    for z in structure["zones"].get("support", []):
+        lines.append({"price": z["mid"], "color": "#79ed8e", "title": f"S {z['n_factors']}x"})
+    profile = structure.get("volume_profile") or {}
+    if profile.get("status") == "OK":
+        lines.append({"price": profile["poc"], "color": "#c792ea", "title": "POC"})
+    exp = structure.get("expected_range") or {}
+    if exp.get("status") == "OK":
+        lines.append({"price": exp["expected_high"], "color": "#8b9a9d", "title": "Exp High"})
+        lines.append({"price": exp["expected_low"], "color": "#8b9a9d", "title": "Exp Low"})
+    return lines
+
+
 def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str,
-                                 data_quality: dict | None = None):
+                                 data_quality: dict | None = None, structure: dict | None = None):
     """Live intraday candlestick chart for the 0DTE page — refreshes every 30s alongside the rest
     of the page fragment, using the SAME 1m bars already fetched above (no new network call).
 
@@ -2834,6 +2860,7 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str,
     payload = json.dumps({"candles": candles, "volumes": volumes, "vwap": vwap_pts,
                           "ema": ema_pts, "sma": sma_pts, "showVwap": show_vwap,
                           "showEma": show_ema, "showSma": show_sma,
+                          "structureLines": _structure_price_lines(structure),
                           # PIIP audit 2026-08, per user request: "now" in the SAME faked-UTC
                           # scheme as every timestamp above (see _et_seconds()) -- lets the chart
                           # extend its default view through the actual current moment instead of
@@ -2876,6 +2903,18 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str,
     wickUpColor: "#79ed8e", wickDownColor: "#ff8080",
   }});
   candleSeries.setData(data.candles);
+
+  // Market Structure Map overlay (per user spec, 2026-08) -- the MINIMAL set of price lines
+  // chosen in _structure_price_lines() (2 nearest resistance/support zones, volume POC,
+  // options-implied expected high/low). Dashed, muted -- deliberately less visually dominant
+  // than the candles/VWAP/MA themselves, per the explicit 'do not obscure candles' priority
+  // order (section 12 of the spec).
+  (data.structureLines || []).forEach(function(line) {{
+    candleSeries.createPriceLine({{
+      price: line.price, color: line.color, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true, title: line.title,
+    }});
+  }});
 
   let volumeSeries = null;
   try {{
@@ -3407,6 +3446,142 @@ def _render_unified_morning_read(pt_data: dict | None, regime: dict, ticker: str
                 _render_ai_column(pt_data)
         with col3:
             _render_regime_column(regime, ticker)
+
+
+def _hover(label: str, tooltip: str, color: str = "#e8ecec") -> str:
+    """Inline HTML span with a real hover tooltip (native title= attribute) -- same mechanism
+    _info_header() already uses for section headers, applied per-value here instead."""
+    return (f'<span style="color:{color};cursor:help;border-bottom:1px dotted #4a5658" '
+           f'title="{_esc(tooltip)}">{_esc(label)}</span>')
+
+
+def _zone_state_label(state: str, side: str) -> str:
+    default = "RESISTANCE" if side == "resistance" else "SUPPORT"
+    return {"APPROACHING": "APPROACHING", "TESTING": "TESTING", "REJECTED": "REJECTION",
+           "BOUNCE": "BOUNCE", "BREAKOUT": "BREAKOUT", "ACCEPTANCE_ABOVE": "ACCEPTED ABOVE",
+           "ACCEPTANCE_BELOW": "ACCEPTED BELOW"}.get(state, default)
+
+
+def _path_target_txt(snapshot: dict | None) -> str:
+    if not snapshot:
+        return "no further structural level identified"
+    return f"${snapshot['mid']:,.2f} ({snapshot['n_factors']} factor(s): {', '.join(snapshot['contributors'])})"
+
+
+def _render_market_structure_map(structure: dict | None, ticker: str) -> None:
+    """The Market Structure Map -- a deterministic VISUALIZATION layer over already-computed
+    PIIP primitives (VWAP, intraday EMA/SMA50, opening range, prior-day levels, volume profile,
+    swing points, options-implied expected move). Per the user's explicit spec:
+    - NOT a new market-bias engine -- consumes existing state, never overrides market_state()/
+      day_regime()/trade_permission()/the Premarket Thesis.
+    - Distinguishes STRUCTURAL FACTS (e.g. 'VWAP = $770.10') from STATISTICAL EXPECTATIONS
+      (e.g. 'Expected High = $773.32', a range estimate) from CONDITIONAL SCENARIOS (e.g.
+      'accepted above -> next level $774.60') -- never presented as equivalent forms of
+      certainty (see the legend in the detail expander below).
+    - Acceptance/rejection require 2+ CONSECUTIVE closes beyond a zone (see
+      iip/market_structure.py::zone_state()'s own docstring for the exact criteria) -- a single
+      wick is a BREAKOUT, not yet an ACCEPTANCE.
+    - 'Conditional path' language ('if accepted -> ...') is never a price prediction."""
+    if not structure or structure.get("spot") is None:
+        return
+    with st.container(border=True):
+        _info_header(f"📐 {ticker} Market Structure Map", (
+            "Deterministic visualization of where price is likely to encounter meaningful "
+            "structure -- volume profile, VWAP/MA confluence, opening range, prior-day levels, "
+            "and swing points, clustered into zones and scored by how many independent "
+            "structural factors overlap there. Does NOT replace Day Regime, Trade Permission, "
+            "or the Premarket Thesis above -- it's a lens on the same kind of evidence, not a "
+            "new directional call. Hover any row for the structural factors behind it."),
+            size="1.1rem")
+
+        spot = structure["spot"]
+        vwap = structure.get("vwap")
+        resistances = structure["zones"]["resistance"]
+        supports = structure["zones"]["support"]
+        exp = structure.get("expected_range") or {}
+
+        # Right-side-style scenario ladder (per spec section 19/24): highest price at top.
+        rows = []
+        if exp.get("status") == "OK":
+            rows.append(("EXPECTED HIGH", exp["expected_high"], "#8b9a9d",
+                        f"STATISTICAL range estimate from the options market's own implied move "
+                        f"({exp['method']}-based, {exp['expiry']} expiry, {exp['dte_days']}d to "
+                        f"expiry): +/-{exp['move_pct']:.2f}% from spot. NOT a guaranteed target."))
+        for i, z in enumerate(resistances):
+            label = _zone_state_label(z["state"]["state"], "resistance") if i == 0 else "NEXT RESISTANCE"
+            tip = (f"Structural factors ({z['n_factors']}): {', '.join(z['contributors'])}. "
+                  f"Current state: {z['state']['state']} -- {z['state']['detail']} "
+                  f"If accepted above: {_path_target_txt(z['path']['if_accepted'])}. "
+                  f"If rejected: {_path_target_txt(z['path']['if_rejected'])}.")
+            rows.append((label, z["mid"], "#ff8080", tip))
+        vwap_tip = (f"VWAP: ${vwap:,.2f} -- price is currently "
+                   f"{'above' if vwap and spot > vwap else 'below' if vwap else 'at'} session VWAP."
+                   if vwap else "Current price.")
+        rows.append(("CURRENT PRICE", spot, "#87d1ff", vwap_tip))
+        for i, z in enumerate(supports):
+            label = _zone_state_label(z["state"]["state"], "support") if i == 0 else "NEXT SUPPORT"
+            tip = (f"Structural factors ({z['n_factors']}): {', '.join(z['contributors'])}. "
+                  f"Current state: {z['state']['state']} -- {z['state']['detail']} "
+                  f"If accepted below: {_path_target_txt(z['path']['if_accepted'])}. "
+                  f"If rejected: {_path_target_txt(z['path']['if_rejected'])}.")
+            rows.append((label, z["mid"], "#79ed8e", tip))
+        if exp.get("status") == "OK":
+            rows.append(("EXPECTED LOW", exp["expected_low"], "#8b9a9d",
+                        f"STATISTICAL range estimate from the options market's own implied move "
+                        f"({exp['method']}-based): +/-{exp['move_pct']:.2f}% from spot. NOT a "
+                        f"guaranteed target."))
+
+        rows.sort(key=lambda r: -r[1])
+        html = ['<div style="font-family:ui-monospace,Consolas,monospace;font-size:0.85rem">']
+        for label, price, color, tip in rows:
+            is_current = label == "CURRENT PRICE"
+            bg = "background:#12181a;border-radius:6px;" if is_current else ""
+            weight = 800 if is_current else 600
+            html.append(
+                f'<div style="display:flex;justify-content:space-between;padding:0.3rem 0.6rem;'
+                f'{bg}border-bottom:1px solid #1c2426">{_hover(label, tip, color)}'
+                f'<span style="font-weight:{weight};color:{color}">${price:,.2f}</span></div>')
+        html.append('</div>')
+        st.markdown("".join(html), unsafe_allow_html=True)
+
+        # Macro/event marker (per spec section 9) -- reuses the FOMC calendar already built for
+        # the Premarket Thesis's catalyst-risk question, never a new calendar.
+        fomc = pc.fomc_today()
+        if fomc.get("in_meeting"):
+            note = (f"FOMC statement — {fomc['statement_time_et']} ET today" if fomc.get("statement_today")
+                   else "FOMC meeting in progress (no statement today)")
+            st.warning(f"📅 {note} — structure may behave differently near this catalyst.")
+
+        with st.expander("Volume Profile & structure detail"):
+            profile = structure.get("volume_profile") or {}
+            if profile.get("status") == "OK":
+                st.write(f"**POC** ${profile['poc']:,.2f} · **VAH** ${profile['vah']:,.2f} · "
+                        f"**VAL** ${profile['val']:,.2f} · Value Area captures "
+                        f"{profile['value_area_pct_actual']:.0%} of today's volume "
+                        f"({profile['n_bars']} bars, 1-min resolution).")
+            else:
+                st.caption(f"Volume Profile: {profile.get('status', 'INSUFFICIENT_DATA')}")
+            hvn_lvn = structure.get("hvn_lvn") or {}
+            if hvn_lvn.get("hvns"):
+                st.write("**HVNs (high volume nodes, price acceptance areas):** " + ", ".join(
+                    f"${h['price']:,.2f}" for h in hvn_lvn["hvns"]))
+            if hvn_lvn.get("lvns"):
+                st.write("**LVNs (low volume -- may see faster traversal if accepted, not a "
+                        "directional prediction):** " + ", ".join(
+                            f"${l['price']:,.2f}" for l in hvn_lvn["lvns"]))
+            swings = structure.get("swings") or {}
+            if swings.get("status") == "OK" and (swings.get("swing_highs") or swings.get("swing_lows")):
+                st.write(f"**Recent swing highs:** {swings['swing_highs']} · "
+                        f"**Recent swing lows:** {swings['swing_lows']}")
+            st.caption("STRUCTURAL facts (VWAP, MA, volume levels) are directly measured. "
+                      "STATISTICAL expectations (Expected High/Low) are a range estimate, not a "
+                      "target. CONDITIONAL scenarios ('if accepted → next level') describe what "
+                      "would follow a specific outcome, never a prediction of which outcome "
+                      "occurs. Acceptance requires 2+ consecutive closes beyond a zone; a single "
+                      "wick is a BREAKOUT, not yet an ACCEPTANCE. Volume profile is built from "
+                      "1-minute bars (this project's free-tier resolution), not tick-level "
+                      "trades -- each bar's volume is spread across its own High-Low range, the "
+                      "standard approximation when only bar data is available.")
 
 
 @st.fragment(run_every=30)
@@ -3943,10 +4118,26 @@ def _render_zero_dte(ticker: str):
         # place. 5-min cache (zd_regime_stats), not recomputed every 30s refresh.
         _render_regime_outcome_table(zd_regime_stats(ticker))
 
+        # Market Structure Map (per user spec, 2026-08) -- a VISUALIZATION layer over already-
+        # computed PIIP primitives (VWAP, intraday EMA/SMA50, opening range, prior-day levels,
+        # volume profile, swing points, options-implied expected move). Does NOT replace or
+        # override market_state()/day_regime()/trade_permission()/the Premarket Thesis -- see
+        # iip/market_structure.py's own module docstring for the full honesty/reuse notes.
+        om_for_structure = None
+        if chain:
+            try:
+                om_for_structure = det.option_metrics(snap["last"], chain)
+            except Exception:
+                om_for_structure = None
+        structure = ms.build_structure_map(intraday.get(ticker), snap["last"], snap.get("vwap"),
+                                           or15, prev_day, om_for_structure)
+
         with st.container(border=True):
             st.markdown(f"**📊 Intraday Chart — {ticker}**")
             _render_intraday_candlestick(ticker, intraday.get(ticker), key_prefix="zd",
-                                         data_quality=data_quality)
+                                         data_quality=data_quality, structure=structure)
+
+        _render_market_structure_map(structure, ticker)
 
         # ── Hero: the one number worth seeing without scrolling ──
         conf_color = _score_color(confidence["score"])
