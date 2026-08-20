@@ -2723,23 +2723,46 @@ def _structure_price_lines(structure: dict | None) -> list[dict]:
     """The MINIMAL set of price lines to actually draw on the candlestick chart -- per the
     spec's own 'do not draw every possible level' instruction: the 2 nearest resistance/support
     zone midpoints, the volume POC, and the options-implied expected high/low. Every OTHER
-    structural fact (HVN/LVN, swing points, VAH/VAL, zone states, conditional paths) still lives
-    in the Market Structure Map panel below the chart -- this only decides what earns a line
-    directly on the price chart itself."""
+    structural fact (HVN/LVN, swing points, VAH/VAL) still lives in the Market Structure Map
+    panel below the chart -- this only decides what earns a line directly on the price chart.
+
+    Each line carries a `detail` string -- per direct user request, the chart's own price lines
+    (canvas-rendered by the charting library, so a native HTML title= tooltip literally cannot
+    attach to them) get a real hover readout via the chart's own crosshair-proximity mechanism
+    instead (see the JS below), not just a static axis label."""
     if not structure:
         return []
     lines = []
     for z in structure["zones"].get("resistance", []):
-        lines.append({"price": z["mid"], "color": "#ff8080", "title": f"R {z['n_factors']}x"})
+        detail = (f"RESISTANCE — {z['n_factors']} factor(s): {', '.join(z['contributors'])} · "
+                 f"State: {z['state']['state']} — {z['state']['detail']} · "
+                 f"If accepted: {_path_target_txt(z['path']['if_accepted'])} · "
+                 f"If rejected: {_path_target_txt(z['path']['if_rejected'])}")
+        lines.append({"price": z["mid"], "color": "#ff8080", "title": f"R {z['n_factors']}x",
+                     "detail": detail})
     for z in structure["zones"].get("support", []):
-        lines.append({"price": z["mid"], "color": "#79ed8e", "title": f"S {z['n_factors']}x"})
+        detail = (f"SUPPORT — {z['n_factors']} factor(s): {', '.join(z['contributors'])} · "
+                 f"State: {z['state']['state']} — {z['state']['detail']} · "
+                 f"If accepted: {_path_target_txt(z['path']['if_accepted'])} · "
+                 f"If rejected: {_path_target_txt(z['path']['if_rejected'])}")
+        lines.append({"price": z["mid"], "color": "#79ed8e", "title": f"S {z['n_factors']}x",
+                     "detail": detail})
     profile = structure.get("volume_profile") or {}
     if profile.get("status") == "OK":
-        lines.append({"price": profile["poc"], "color": "#c792ea", "title": "POC"})
+        detail = (f"VOLUME POC — the single price with the most session volume. Value Area "
+                 f"${profile['val']:,.2f}-${profile['vah']:,.2f} captures "
+                 f"{profile['value_area_pct_actual']:.0%} of today's volume "
+                 f"({profile['n_bars']} 1-min bars).")
+        lines.append({"price": profile["poc"], "color": "#c792ea", "title": "POC", "detail": detail})
     exp = structure.get("expected_range") or {}
     if exp.get("status") == "OK":
-        lines.append({"price": exp["expected_high"], "color": "#8b9a9d", "title": "Exp High"})
-        lines.append({"price": exp["expected_low"], "color": "#8b9a9d", "title": "Exp Low"})
+        base_detail = (f"STATISTICAL range estimate from the options market's own implied move "
+                       f"({exp['method']}-based, {exp['expiry']} expiry, {exp['dte_days']}d to "
+                       f"expiry): +/-{exp['move_pct']:.2f}% from spot. NOT a guaranteed target.")
+        lines.append({"price": exp["expected_high"], "color": "#8b9a9d", "title": "Exp High",
+                     "detail": "EXPECTED HIGH — " + base_detail})
+        lines.append({"price": exp["expected_low"], "color": "#8b9a9d", "title": "Exp Low",
+                     "detail": "EXPECTED LOW — " + base_detail})
     return lines
 
 
@@ -2970,12 +2993,32 @@ def _render_intraday_candlestick(ticker: str, intraday_df, key_prefix: str,
     }}
     if (!bar) {{ legend.textContent = "No data"; return; }}
     const upDown = bar.close >= bar.open ? "#79ed8e" : "#ff8080";
-    legend.innerHTML = `<b>${{ticker}}</b> &nbsp; ${{fmtDateTime(bar.time)}} &nbsp; `
+    let html = `<b>${{ticker}}</b> &nbsp; ${{fmtDateTime(bar.time)}} &nbsp; `
       + `O <span style="color:${{upDown}}">${{bar.open.toFixed(2)}}</span> `
       + `H <span style="color:${{upDown}}">${{bar.high.toFixed(2)}}</span> `
       + `L <span style="color:${{upDown}}">${{bar.low.toFixed(2)}}</span> `
       + `C <span style="color:${{upDown}}">${{bar.close.toFixed(2)}}</span>`
       + (vol ? ` &nbsp; Vol ${{Math.round(vol.value).toLocaleString()}}` : "");
+
+    // Market Structure Map hover detail (per direct user request): the price LINES drawn above
+    // are canvas-rendered, so a native HTML title= tooltip literally cannot attach to them --
+    // instead, when the crosshair's pixel Y lands within a few px of a structure line's own
+    // price coordinate, that line's full detail (contributors/state/conditional path) shows in
+    // this SAME legend strip, reusing the existing crosshair-tracking mechanism rather than
+    // building a second hover system.
+    if (param && param.point && (data.structureLines || []).length) {{
+      let nearest = null, nearestDist = 6;   // px tolerance
+      (data.structureLines || []).forEach(function(line) {{
+        const y = candleSeries.priceToCoordinate(line.price);
+        if (y === null) return;
+        const dist = Math.abs(y - param.point.y);
+        if (dist <= nearestDist) {{ nearest = line; nearestDist = dist; }}
+      }});
+      if (nearest) {{
+        html += `<div style="margin-top:0.2rem;color:${{nearest.color}}">${{nearest.detail}}</div>`;
+      }}
+    }}
+    legend.innerHTML = html;
   }}
   chart.subscribeCrosshairMove(updateLegend);
   updateLegend(null);
